@@ -141,7 +141,9 @@ def begin():
     endpoint = Path(os.environ["XDG_RUNTIME_DIR"]) / "hypr" / os.environ["HYPRLAND_INSTANCE_SIGNATURE"]
     assert (endpoint / ".socket.sock").is_socket()
     assert os.environ["DBUS_SYSTEM_BUS_ADDRESS"] == os.environ["DBUS_SESSION_BUS_ADDRESS"]
-    assert hypr("configerrors") == [], "Lua smoke config failed before panel startup"
+    # Hyprland 0.56.2 serializes an empty error string as [""] in JSON.
+    config_errors = hypr("configerrors")
+    assert config_errors == [""], f"Lua smoke config failed before panel startup: {config_errors}"
     CONFIG.parent.mkdir(parents=True, exist_ok=True)
     CONFIG.write_text(configuration())
     run(BAR, "--config", str(CONFIG), "--check-config", "--strict")
