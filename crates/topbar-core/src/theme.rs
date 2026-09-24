@@ -1,7 +1,6 @@
-//! Theme primitives.
-//!
-//! M0 ships only the color types and hex parsing that config validation needs.
-//! The full palette + stylesheet generator lands with the bar shell (M1).
+//! Resolved theme colors shared by CSS and custom drawing.
+
+use crate::Config;
 
 /// An opaque 8-bit-per-channel RGB color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -41,6 +40,15 @@ impl Rgb {
             }
         }
         0.2126 * channel(self.r) + 0.7152 * channel(self.g) + 0.0722 * channel(self.b)
+    }
+
+    /// Black or white, whichever reads best on this background.
+    pub fn contrasting_foreground(self) -> Self {
+        if self.relative_luminance() > 0.179 {
+            Self::new(0, 0, 0)
+        } else {
+            Self::new(255, 255, 255)
+        }
     }
 }
 
@@ -83,9 +91,110 @@ pub fn is_valid_hex_color(color: &str) -> bool {
     color.starts_with('#') && parse_hex_color(color).is_some()
 }
 
+/// One resolved palette, computed when configuration is applied or a widget is built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Palette {
+    /// Base panel/popover background.
+    pub background: Rgb,
+    /// Elevated neutral surface.
+    pub surface: Rgb,
+    /// Text and neutral fills.
+    pub foreground: Rgb,
+    /// Effective bar background after its explicit override.
+    pub bar: Rgb,
+    /// Effective widget background after its explicit override.
+    pub widget: Rgb,
+    /// Accent, or foreground when configured as `none`.
+    pub accent: Rgb,
+    /// Success tint.
+    pub success: Rgb,
+    /// Warning tint.
+    pub warning: Rgb,
+    /// Urgency/error tint.
+    pub urgent: Rgb,
+}
+
+impl Palette {
+    /// Resolve validated config; deterministic defaults also support hand-built configs.
+    pub fn from_config(config: &Config) -> Self {
+        let (background, surface, foreground) = if config.theme.mode == "light" {
+            (
+                Rgb::new(255, 255, 255),
+                Rgb::new(241, 241, 243),
+                Rgb::new(0, 0, 0),
+            )
+        } else {
+            (
+                Rgb::new(0, 0, 0),
+                Rgb::new(30, 30, 34),
+                Rgb::new(255, 255, 255),
+            )
+        };
+        let color =
+            |value: Option<&str>, fallback| value.and_then(parse_hex_color).unwrap_or(fallback);
+        let palette = &config.theme.palette;
+        let background = color(palette.background.as_deref(), background);
+        let surface = color(palette.surface.as_deref(), surface);
+        let foreground = color(palette.foreground.as_deref(), foreground);
+        Self {
+            background,
+            surface,
+            foreground,
+            bar: color(config.bar.background_color.as_deref(), background),
+            widget: color(config.widgets.background_color.as_deref(), surface),
+            accent: if config.theme.accent == "none" {
+                foreground
+            } else {
+                color(Some(&config.theme.accent), Rgb::new(0x35, 0x84, 0xe4))
+            },
+            success: color(
+                Some(&config.theme.states.success),
+                Rgb::new(0x4a, 0x7a, 0x4a),
+            ),
+            warning: color(
+                Some(&config.theme.states.warning),
+                Rgb::new(0xe5, 0xc0, 0x7b),
+            ),
+            urgent: color(
+                Some(&config.theme.states.urgent),
+                Rgb::new(0xff, 0x6b, 0x6b),
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modes_overrides_monochrome_and_contrast_resolve_together() {
+        let mut config = Config::parse("[theme]\nmode = \"light\"\naccent = \"none\"")
+            .unwrap()
+            .0;
+        let light = Palette::from_config(&config);
+        assert_eq!(light.bar, Rgb::new(255, 255, 255));
+        assert_eq!(light.widget, Rgb::new(241, 241, 243));
+        assert_eq!(light.accent, Rgb::new(0, 0, 0));
+        config.theme.palette.background = Some("#abc".into());
+        config.theme.palette.surface = Some("#def".into());
+        config.theme.palette.foreground = Some("#123".into());
+        let palette = Palette::from_config(&config);
+        assert_eq!(palette.bar, Rgb::new(170, 187, 204));
+        assert_eq!(palette.widget, Rgb::new(221, 238, 255));
+        assert_eq!(palette.accent, Rgb::new(17, 34, 51));
+        config.bar.background_color = Some("#456".into());
+        config.widgets.background_color = Some("#789".into());
+        let overrides = Palette::from_config(&config);
+        assert_eq!(overrides.bar, Rgb::new(68, 85, 102));
+        assert_eq!(overrides.widget, Rgb::new(119, 136, 153));
+        for (background, text) in [
+            (Rgb::new(255, 107, 107), Rgb::new(0, 0, 0)),
+            (Rgb::new(156, 50, 65), Rgb::new(255, 255, 255)),
+        ] {
+            assert_eq!(background.contrasting_foreground(), text);
+        }
+    }
 
     #[test]
     fn parses_shorthand_and_full_hex() {

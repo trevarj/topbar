@@ -49,7 +49,7 @@ pub const SUPPORTED_WIDGETS: &[&str] = &[
 pub const SUPPORTED_CRYPTO_ASSETS: &[&str] = &["btc", "eth", "xmr"];
 
 const VALID_OSD_POSITIONS: &[&str] = &["bottom", "left", "right", "top"];
-const VALID_COMPOSITORS: &[&str] = &["auto", "niri"];
+const VALID_COMPOSITORS: &[&str] = &["auto", "niri", "hyprland"];
 const VALID_WEATHER_UNITS: &[&str] = &["c", "celsius", "f", "fahrenheit"];
 const VALID_LABEL_TYPES: &[&str] = &["none", "index", "name"];
 const VALID_LAYOUT_FORMATS: &[&str] = &["short", "long"];
@@ -85,15 +85,15 @@ pub const DROPPED_KEYS: &[(&str, &str)] = &[
     ),
     (
         "theme.scheme",
-        "Material You theming was dropped; v2 ships a single dark palette",
+        "Material You theming was dropped; select theme.mode and theme.palette explicitly",
     ),
     (
         "theme.wallpaper",
-        "wallpaper palette extraction was dropped; v2 ships a single dark palette",
+        "wallpaper palette extraction was dropped; configure theme.palette explicitly",
     ),
     (
         "theme.popover",
-        "per-surface light/dark polarity was dropped; popovers follow the dark palette",
+        "per-surface light/dark polarity was dropped; popovers follow theme.mode",
     ),
     (
         "theme.shadows",
@@ -670,19 +670,19 @@ fn parse_bar(mut table: Table, lint: &mut Lint) -> BarConfig {
 
 fn parse_theme(mut table: Table, lint: &mut Lint) -> ThemeConfig {
     match table.get("mode").and_then(toml::Value::as_str) {
-        Some("dark") | None => {}
-        Some(mode @ ("auto" | "light" | "gtk")) => {
+        Some("dark" | "light") | None => {}
+        Some(mode @ ("auto" | "gtk")) => {
             lint.warn(
                 "theme.mode",
                 format!(
-                    "\"{mode}\" was dropped; v2 ships a single dark palette and is rendering as \"dark\""
+                    "\"{mode}\" was dropped; choose \"dark\" or \"light\"; rendering as \"dark\""
                 ),
             );
             table.remove("mode");
         }
         Some(other) => {
             lint.error(format!(
-                "theme.mode: invalid value '{other}', expected \"dark\""
+                "theme.mode: invalid value '{other}', expected \"dark\" or \"light\""
             ));
             table.remove("mode");
         }
@@ -700,6 +700,7 @@ fn parse_theme(mut table: Table, lint: &mut Lint) -> ThemeConfig {
         ("icons", THEME_ICONS_KEYS),
         ("states", THEME_STATES_KEYS),
         ("typography", THEME_TYPOGRAPHY_KEYS),
+        ("palette", THEME_PALETTE_KEYS),
     ] {
         if let Some(toml::Value::Table(nested)) = table.get_mut(name) {
             retain_known(
@@ -915,8 +916,8 @@ pub struct BarConfig {
     pub border_radius: u32,
     /// Gap between the bar and popovers anchored to it, in pixels.
     pub popover_offset: u32,
-    /// Bar background color (hex).
-    pub background_color: String,
+    /// Bar background override (hex). Unset inherits the resolved palette.
+    pub background_color: Option<String>,
     /// Bar background opacity, 0.0..=1.0.
     pub background_opacity: f64,
 }
@@ -932,7 +933,7 @@ impl Default for BarConfig {
             padding: 0,
             border_radius: 0,
             popover_offset: 1,
-            background_color: "#000000".to_string(),
+            background_color: None,
             background_opacity: 1.0,
         }
     }
@@ -949,7 +950,9 @@ impl BarConfig {
         if self.size == 0 {
             lint.error("bar.size: must be greater than 0");
         }
-        check_hex(lint, "bar.background_color", &self.background_color);
+        if let Some(color) = &self.background_color {
+            check_hex(lint, "bar.background_color", color);
+        }
         check_opacity(lint, "bar.background_opacity", self.background_opacity);
     }
 }
@@ -1911,13 +1914,14 @@ const THEME_KEYS: &[&str] = &[
     "icons",
     "states",
     "typography",
+    "palette",
 ];
 
-/// `[theme]` — dark-only palette, motion, icons, typography.
+/// `[theme]` — palette, motion, icons, typography.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ThemeConfig {
-    /// Accepted for compatibility; `"dark"` is the only value v2 honors.
+    /// Native `"dark"` or `"light"` polarity.
     pub mode: String,
     /// Accent color: a hex color, or `"none"` for monochrome.
     pub accent: String,
@@ -1933,6 +1937,8 @@ pub struct ThemeConfig {
     pub states: ThemeStates,
     /// Font settings.
     pub typography: ThemeTypography,
+    /// Optional neutral palette overrides.
+    pub palette: ThemePalette,
 }
 
 impl Default for ThemeConfig {
@@ -1946,17 +1952,22 @@ impl Default for ThemeConfig {
             icons: ThemeIcons::default(),
             states: ThemeStates::default(),
             typography: ThemeTypography::default(),
+            palette: ThemePalette::default(),
         }
     }
 }
 
 impl ThemeConfig {
     fn validate(&self, lint: &mut Lint) {
-        if self.mode != "dark" {
-            lint.error(format!(
-                "theme.mode: invalid value '{}', expected \"dark\"",
-                self.mode
-            ));
+        check_enum(lint, "theme.mode", &self.mode, &["dark", "light"]);
+        for (key, value) in [
+            ("background", &self.palette.background),
+            ("surface", &self.palette.surface),
+            ("foreground", &self.palette.foreground),
+        ] {
+            if let Some(color) = value {
+                check_hex(lint, &format!("theme.palette.{key}"), color);
+            }
         }
         if self.accent != "none" {
             check_hex(lint, "theme.accent", &self.accent);
@@ -1971,6 +1982,20 @@ impl ThemeConfig {
             lint.error("theme.icons.theme: must not be empty");
         }
     }
+}
+
+const THEME_PALETTE_KEYS: &[&str] = &["background", "surface", "foreground"];
+
+/// `[theme.palette]` — omitted roles inherit the selected mode's defaults.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ThemePalette {
+    /// Panel/popover background before explicit bar overrides.
+    pub background: Option<String>,
+    /// Elevated and widget surface color.
+    pub surface: Option<String>,
+    /// Normal text, neutral fills and symbolic icons.
+    pub foreground: Option<String>,
 }
 
 const THEME_ICONS_KEYS: &[&str] = &["theme", "weight"];
@@ -2124,7 +2149,7 @@ const ADVANCED_KEYS: &[&str] = &["compositor", "pango_font_rendering"];
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AdvancedConfig {
-    /// Compositor backend: `"auto"` or `"niri"` (both use the niri backend).
+    /// Startup-only backend: `"auto"`, `"niri"` or `"hyprland"`.
     pub compositor: String,
     /// Apply Pango font attributes directly instead of relying on GTK CSS.
     pub pango_font_rendering: bool,
@@ -2242,12 +2267,31 @@ mod tests {
 
     #[test]
     fn dropped_theme_modes_are_accepted_as_dark() {
-        for mode in ["auto", "light", "gtk"] {
+        for mode in ["auto", "gtk"] {
             let (config, warnings) = parse_ok(&format!("[theme]\nmode = \"{mode}\"\n"));
             assert_eq!(config.theme.mode, "dark");
             assert_eq!(warning_keys(&warnings), vec!["theme.mode"]);
-            assert!(warnings[0].message.contains("single dark palette"));
         }
+    }
+
+    #[test]
+    fn palette_and_mode_are_validated_at_the_configuration_boundary() {
+        let (config, warnings) = parse_ok(
+            "[theme]\nmode = \"light\"\naccent = \"none\"\n[theme.palette]\nbackground = \"#abc\"\nsurface = \"#123456\"\nforeground = \"#000\"",
+        );
+        assert_eq!(config.theme.mode, "light");
+        assert_eq!(config.theme.palette.background.as_deref(), Some("#abc"));
+        assert!(warnings.is_empty());
+        for value in ["none", "#12345678", "rgb(1,2,3)", "white"] {
+            assert!(Config::parse(&format!("[theme.palette]\nforeground = {value:?}")).is_err());
+        }
+        assert!(Config::parse("[theme]\npalette = false").is_err());
+        let (_, warnings) = parse_ok("[theme.palette]\nunknown = \"#fff\"");
+        assert_eq!(warning_keys(&warnings), ["theme.palette.unknown"]);
+        for backend in ["auto", "niri", "hyprland"] {
+            assert!(Config::parse(&format!("[advanced]\ncompositor = {backend:?}")).is_ok());
+        }
+        assert!(Config::parse("[advanced]\ncompositor = \"sway\"").is_err());
     }
 
     #[test]

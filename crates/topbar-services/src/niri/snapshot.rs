@@ -13,91 +13,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use niri_ipc::state::EventStreamState;
 
-/// One workspace, as the panel draws it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkspaceView {
-    /// Stable id, used to focus this workspace.
-    pub id: u64,
-    /// Position on its output. Changes when workspaces are re-ordered.
-    pub idx: u8,
-    /// Configured name, if the user gave it one.
-    pub name: Option<String>,
-    /// Whether this is the visible workspace on its output.
-    pub is_active: bool,
-    /// Whether this is the one focused workspace across all outputs.
-    pub is_focused: bool,
-    /// Whether this workspace, or a window on it, wants attention.
-    pub is_urgent: bool,
-    /// Whether any window lives on this workspace.
-    pub has_windows: bool,
-}
-
-/// Every workspace the compositor reports, grouped by output.
-///
-/// The map is a `BTreeMap` so iterating it (which the widget does when
-/// `filter_by_output = false`) has a stable, name-sorted order rather than a
-/// hash order that reshuffles the bar on every rebuild.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct WorkspacesSnapshot {
-    /// Whether the event stream is currently connected.
-    ///
-    /// While this is `false` the rest of the snapshot is the last state we
-    /// saw; widgets dim rather than empty themselves.
-    pub connected: bool,
-    /// Connector name (`eDP-1`) → its workspaces, sorted by index.
-    pub outputs: BTreeMap<String, Vec<WorkspaceView>>,
-    /// Connector holding the focused workspace, if any.
-    pub focused_output: Option<String>,
-}
-
-impl WorkspacesSnapshot {
-    /// The workspaces on `connector`, or an empty slice if it has none.
-    pub fn for_output(&self, connector: &str) -> &[WorkspaceView] {
-        self.outputs.get(connector).map_or(&[], Vec::as_slice)
-    }
-
-    /// Every workspace on every output, in connector order then index order.
-    pub fn all(&self) -> impl Iterator<Item = &WorkspaceView> {
-        self.outputs.values().flatten()
-    }
-
-    /// The same snapshot, marked as coming from a live connection or not.
-    pub fn with_connected(mut self, connected: bool) -> Self {
-        self.connected = connected;
-        self
-    }
-}
-
-/// The configured keyboard layouts and which one is active.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct KeyboardLayoutSnapshot {
-    /// Whether the event stream is currently connected.
-    pub connected: bool,
-    /// Layout descriptions as niri reports them, e.g. `"English (US)"`.
-    pub names: Vec<String>,
-    /// Index into [`Self::names`] of the active layout.
-    pub current_idx: u8,
-}
-
-impl KeyboardLayoutSnapshot {
-    /// The active layout's full name, if the index is in range.
-    pub fn current(&self) -> Option<&str> {
-        self.names
-            .get(usize::from(self.current_idx))
-            .map(String::as_str)
-    }
-
-    /// Whether there is more than one layout to switch between.
-    pub fn is_switchable(&self) -> bool {
-        self.names.len() > 1
-    }
-
-    /// The same snapshot, marked as coming from a live connection or not.
-    pub fn with_connected(mut self, connected: bool) -> Self {
-        self.connected = connected;
-        self
-    }
-}
+use crate::compositor::{KeyboardLayoutSnapshot, WorkspaceId, WorkspaceView, WorkspacesSnapshot};
 
 /// Project the workspace half of `state`.
 ///
@@ -129,13 +45,14 @@ pub(crate) fn workspaces(state: &EventStreamState, connected: bool) -> Workspace
             focused_output = Some(output.clone());
         }
         outputs.entry(output).or_default().push(WorkspaceView {
-            id: workspace.id,
-            idx: workspace.idx,
+            id: WorkspaceId::Niri(workspace.id),
+            idx: usize::from(workspace.idx),
             name: workspace.name.clone(),
             is_active: workspace.is_active,
             is_focused: workspace.is_focused,
             is_urgent: workspace.is_urgent || urgent_windows.contains(&workspace.id),
             has_windows: occupied.contains(&workspace.id),
+            is_persistent: workspace.name.is_some(),
         });
     }
 
@@ -157,9 +74,9 @@ pub(crate) fn keyboard_layout(state: &EventStreamState, connected: bool) -> Keyb
     let layouts = state.keyboard_layouts.keyboard_layouts.as_ref();
     KeyboardLayoutSnapshot {
         connected,
-        names: layouts
-            .map(|layouts| layouts.names.clone())
-            .unwrap_or_default(),
-        current_idx: layouts.map_or(0, |layouts| layouts.current_idx),
+        current_name: layouts
+            .and_then(|layouts| layouts.names.get(usize::from(layouts.current_idx)))
+            .cloned(),
+        layout_count: layouts.map_or(0, |layouts| layouts.names.len()),
     }
 }

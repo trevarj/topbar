@@ -19,8 +19,8 @@ use gtk4::prelude::*;
 use gtk4::{EventControllerScroll, EventControllerScrollFlags, GestureClick, gdk, glib};
 use topbar_core::Config;
 use topbar_core::config::WorkspacesConfig;
-use topbar_core::theme::{Rgb, parse_hex_color};
-use topbar_services::{NiriHandle, WorkspacesSnapshot};
+use topbar_core::theme::{Palette, Rgb};
+use topbar_services::{CompositorHandle, WorkspaceId, WorkspacesSnapshot};
 use tracing::debug;
 
 use crate::bar::BarContext;
@@ -47,7 +47,7 @@ struct State {
     /// The slots currently on screen, for hit testing and scroll stepping.
     slots: RefCell<Vec<Slot>>,
     scroll: RefCell<ScrollAccumulator>,
-    niri: NiriHandle,
+    compositor: CompositorHandle,
 }
 
 impl WorkspacesWidget {
@@ -65,7 +65,7 @@ impl WorkspacesWidget {
             strip: strip.clone(),
             slots: RefCell::new(Vec::new()),
             scroll: RefCell::new(ScrollAccumulator::default()),
-            niri: context.services.niri.handle().clone(),
+            compositor: context.services.compositor.handle(),
         });
 
         // `SlotOptions` borrows the connector name, so the closure keeps its
@@ -76,7 +76,7 @@ impl WorkspacesWidget {
         let label_type = LabelType::parse(&settings.label_type);
 
         let wrapper = shell.root().clone();
-        let binding = bridge::bind_state(&strip, context.services.niri.workspaces(), {
+        let binding = bridge::bind_state(&strip, context.services.compositor.workspaces(), {
             let state = Rc::clone(&state);
             move |strip: &WorkspaceStrip, snapshot: &WorkspacesSnapshot| {
                 let slots = model::visible_slots(
@@ -129,10 +129,10 @@ fn install_click(strip: &WorkspaceStrip, state: &Rc<State>) {
             let Some(slot) = state.slots.borrow().get(index).cloned() else {
                 return;
             };
-            if slot.is_active {
+            if slot.is_focused {
                 return;
             }
-            focus(&state.niri, slot.id);
+            focus(&state.compositor, slot.id);
         }
     });
     strip.add_controller(click);
@@ -156,22 +156,22 @@ fn install_scroll(wrapper: &gtk4::Box, state: &Rc<State>) {
                 return glib::Propagation::Stop;
             };
 
-            focus(&state.niri, slots[target].id);
+            focus(&state.compositor, slots[target].id);
             glib::Propagation::Stop
         }
     });
     wrapper.add_controller(scroll);
 }
 
-/// Ask niri to focus `id`, reporting failure through the one action path.
-fn focus(niri: &NiriHandle, id: u64) {
-    debug!("focusing workspace {id}");
-    let niri = niri.clone();
+/// Focus the captured native workspace through the selected backend.
+fn focus(compositor: &CompositorHandle, id: WorkspaceId) {
+    debug!("focusing workspace {id:?}");
+    let compositor = compositor.clone();
     bridge::act(
         ActionScope::Toast {
             widget: WIDGET_NAME,
         },
-        async move { niri.focus_workspace(id).await },
+        async move { compositor.focus_workspace(id).await },
     );
 }
 
@@ -181,9 +181,11 @@ fn focus(niri: &NiriHandle, id: u64) {
 /// cannot, because GTK4 has no supported way to look a custom property up from
 /// Rust, and inventing one would put the palette in two places.
 fn colors(config: &Config) -> StripColors {
+    let palette = Palette::from_config(config);
     StripColors {
-        urgent: rgba(&config.theme.states.urgent, Rgb::new(0xef, 0x44, 0x44)),
-        on_active: rgba(&config.bar.background_color, Rgb::new(0, 0, 0)),
+        urgent: rgba(palette.urgent),
+        on_active: rgba(palette.bar),
+        on_urgent: rgba(palette.urgent.contrasting_foreground()),
     }
 }
 
@@ -192,9 +194,8 @@ fn animate(config: &Config, settings: &WorkspacesConfig) -> bool {
     settings.animate.unwrap_or(config.theme.animations)
 }
 
-/// Parse a configured hex color into a GDK color.
-fn rgba(value: &str, fallback: Rgb) -> gdk::RGBA {
-    let color = parse_hex_color(value).unwrap_or(fallback);
+/// Convert a resolved color into a GDK color.
+fn rgba(color: Rgb) -> gdk::RGBA {
     gdk::RGBA::new(
         f32::from(color.r) / 255.0,
         f32::from(color.g) / 255.0,
@@ -206,24 +207,6 @@ fn rgba(value: &str, fallback: Rgb) -> gdk::RGBA {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn colors_come_from_the_configured_palette() {
-        let mut config = Config::default();
-        config.theme.states.urgent = "#ff0000".to_string();
-        config.bar.background_color = "#000000".to_string();
-
-        let colors = colors(&config);
-        assert_eq!(colors.urgent, gdk::RGBA::new(1.0, 0.0, 0.0, 1.0));
-        assert_eq!(colors.on_active, gdk::RGBA::new(0.0, 0.0, 0.0, 1.0));
-    }
-
-    #[test]
-    fn a_malformed_color_falls_back_instead_of_failing() {
-        let mut config = Config::default();
-        config.theme.states.urgent = "not a color".to_string();
-        assert_eq!(colors(&config).urgent.alpha(), 1.0);
-    }
 
     #[test]
     fn the_animate_option_overrides_the_theme() {

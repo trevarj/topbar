@@ -123,11 +123,16 @@
 # `topbar volume set 30` and the rest against the session it is inside.
 set -eu
 
+# A nested non-session launch does not replace inherited desktop markers.
+export XDG_CURRENT_DESKTOP=niri
+unset HYPRLAND_INSTANCE_SIGNATURE
+
 artifact_dir="${1:-target/visual-smoke}"
 config="${TOPBAR_VISUAL_CONFIG:-config.toml}"
 driver="${TOPBAR_SMOKE_DRIVER:-}"
 timeout_s="${TOPBAR_SMOKE_TIMEOUT:-30}"
 mkdir -p "$artifact_dir"
+rm -f "$artifact_dir/backend-ok"
 
 bus_config=$(pwd)/scripts/smoke-session.conf
 
@@ -406,7 +411,23 @@ fi
 panel_pid=$!
 # The driver reads /proc/$SMOKE_PANEL_PID/status to watch the panel grow.
 export SMOKE_PANEL_PID="$panel_pid"
-sleep 2
+# Backend selection is part of the proof, not something a screenshot can show.
+python3 - "$1" "$3/compositor.json" <<"PY"
+import json, pathlib, subprocess, sys, time
+deadline = time.monotonic() + 20
+while time.monotonic() < deadline:
+    result = subprocess.run([sys.argv[1], "dump", "state", "--json"], capture_output=True, text=True)
+    if result.returncode == 0:
+        state = json.loads(result.stdout)
+        compositor = state["compositor"]
+        if compositor["backend"] == "niri" and compositor["connected"]:
+            pathlib.Path(sys.argv[2]).write_text(result.stdout)
+            break
+    time.sleep(0.1)
+else:
+    raise SystemExit("nested Niri panel never selected a connected niri backend")
+PY
+touch "$3/backend-ok"
 if [ -n "$4" ]; then
   # niri detaches the stdio of what it spawns, so the driver is captured the
   # same way the panel is. A driver that failed silently was how a broken
@@ -426,6 +447,10 @@ niri msg action quit --skip-confirmation >/dev/null 2>&1 || true
   "${TOPBAR_SMOKE_PULSE:-}" "$power_abs" "${TOPBAR_SMOKE_POWER:-}" \
   "$nm_abs" "${TOPBAR_SMOKE_NM:-}" "$bluez_abs" "${TOPBAR_SMOKE_BLUEZ:-}"
 
+test -f "$artifact_dir_abs/backend-ok" || {
+  echo "nested Niri backend assertion did not complete" >&2
+  exit 1
+}
 echo "--- panel log ---"
 cat "$artifact_dir_abs/panel.log" 2>/dev/null || true
 echo "-----------------"

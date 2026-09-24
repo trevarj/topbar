@@ -8,7 +8,6 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use niri_ipc::socket::SOCKET_PATH_ENV;
 use tokio::runtime;
 use topbar_core::Config;
 use tracing::info;
@@ -17,6 +16,7 @@ use crate::audio::Audio;
 use crate::battery::Battery;
 use crate::bluetooth::Bluetooth;
 use crate::brightness::Brightness;
+use crate::compositor::Compositor;
 use crate::connectivity::Connectivity;
 use crate::crypto::Crypto;
 use crate::custom::CustomWidgets;
@@ -26,7 +26,6 @@ use crate::ipc::Ipc;
 use crate::lifecycle::Lifecycle;
 use crate::media::Media;
 use crate::network::Network;
-use crate::niri::Niri;
 use crate::notifications::Notifications;
 use crate::notmuch::Notmuch;
 use crate::power::Power;
@@ -70,8 +69,8 @@ impl Runtime {
 /// start-up order, so `main` does not change again as milestones land.
 #[derive(Clone)]
 pub struct Services {
-    /// The niri compositor service.
-    pub niri: Niri,
+    /// The selected compositor service.
+    pub compositor: Compositor,
     /// The notification daemon.
     pub notifications: Notifications,
     /// The MPRIS media players.
@@ -179,7 +178,7 @@ fn smoke(variable: &str) -> Option<String> {
 ///
 /// Everything absent from here is unconditional, and each for a reason: audio,
 /// brightness and the inhibitor answer `topbar volume`/`brightness`/`inhibit`
-/// with no bar in sight; niri drives the OSD and every per-output decision;
+/// with no bar in sight; the compositor drives OSD and per-output decisions;
 /// notifications is a *role* on the session bus rather than a widget; the
 /// network is what connectivity is projected from, and weather, crypto and
 /// `requires_network` scripts all gate on that.
@@ -232,7 +231,7 @@ impl Services {
     /// — see [`Demand`]. A reload that adds such a widget calls
     /// [`Self::start_if_needed`], which is why the two live next to each other.
     pub fn start(config: &Config) -> Self {
-        let niri_socket = std::env::var_os(SOCKET_PATH_ENV).map(PathBuf::from);
+        let compositor = config.advanced.compositor.clone();
         let weather = config.widgets.weather.clone();
         let crypto = config.widgets.crypto.clone();
         let custom = config.widgets.custom.clone();
@@ -267,7 +266,7 @@ impl Services {
             let network = Network::start(nm_bus, state.network, Some(store.clone()));
             let connectivity = Connectivity::from_network(&network);
             Self {
-                niri: Niri::start(niri_socket),
+                compositor: Compositor::start(&compositor),
                 notifications: Notifications::start(state.notifications, store.clone(), None),
                 media: Media::start(None, demand.media),
                 weather: Weather::start(
@@ -330,9 +329,9 @@ impl Services {
 
     /// Ask every service that has something stale to go and look again.
     async fn wake(&self) {
-        // The niri stream first: everything else is a number on the panel, and
+        // The compositor stream first: everything else is a number on the panel,
         // this one is whether the panel is showing this session at all.
-        self.niri.health_check();
+        self.compositor.health_check();
         // The CPU delta spans the sleep and is meaningless; the next reading
         // has to start a fresh pair rather than report a spike.
         self.resources.handle().discard_stale_sample().await;

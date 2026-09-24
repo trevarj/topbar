@@ -33,8 +33,6 @@ mod imp {
         pub(super) radius: Cell<f32>,
         /// Outline width drawn on the clip boundary. 0 disables it.
         pub(super) outline_width: Cell<f32>,
-        /// Outline color.
-        pub(super) outline_color: Cell<gtk4::gdk::RGBA>,
         /// The single child.
         pub(super) child: glib::WeakRef<gtk4::Widget>,
     }
@@ -45,7 +43,6 @@ mod imp {
                 scale: Cell::new(1.0),
                 radius: Cell::default(),
                 outline_width: Cell::default(),
-                outline_color: Cell::new(gtk4::gdk::RGBA::TRANSPARENT),
                 child: glib::WeakRef::new(),
             }
         }
@@ -111,7 +108,7 @@ mod imp {
             if scale >= 1.0 {
                 widget.snapshot_child(&child, snapshot);
                 let full = gtk4::graphene::Rect::new(0.0, 0.0, width, height);
-                self.snapshot_outline(snapshot, full, radius);
+                self.snapshot_outline(snapshot, full, radius, &child);
                 return;
             }
 
@@ -129,7 +126,7 @@ mod imp {
             widget.snapshot_child(&child, snapshot);
             snapshot.pop();
 
-            self.snapshot_outline(snapshot, rect, radius);
+            self.snapshot_outline(snapshot, rect, radius, &child);
         }
     }
 
@@ -139,10 +136,15 @@ mod imp {
             snapshot: &gtk4::Snapshot,
             rect: gtk4::graphene::Rect,
             radius: f32,
+            child: &gtk4::Widget,
         ) {
             let width = self.outline_width.get();
-            let color = self.outline_color.get();
-            if width <= 0.0 || color.alpha() <= 0.0 {
+            if width <= 0.0 {
+                return;
+            }
+            let mut color = child.color();
+            color.set_alpha(color.alpha() * 0.08);
+            if color.alpha() <= 0.0 {
                 return;
             }
             snapshot.append_border(&rounded(rect, radius), &[width; 4], &[color; 4]);
@@ -203,16 +205,13 @@ impl ScaleBox {
     /// Draw (or stop drawing) an outline on the clip boundary.
     ///
     /// Pass a width of `0.0` to turn it off.
-    pub fn set_outline(&self, width: f32, color: gtk4::gdk::RGBA) {
+    pub fn set_outline(&self, width: f32) {
         let imp = self.imp();
         let width = width.max(0.0);
-        let unchanged = (imp.outline_width.get() - width).abs() < f32::EPSILON
-            && imp.outline_color.get() == color;
-        if unchanged {
+        if (imp.outline_width.get() - width).abs() < f32::EPSILON {
             return;
         }
         imp.outline_width.set(width);
-        imp.outline_color.set(color);
         self.queue_draw();
     }
 

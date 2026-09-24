@@ -528,8 +528,7 @@ impl LayerPopover {
         // away for the whole run, so the boundary is drawn by the ScaleBox
         // instead while motion is in flight.
         if motion_enabled() {
-            self.shell
-                .set_outline(OUTLINE_WIDTH, style::surface_border());
+            self.shell.set_outline(OUTLINE_WIDTH);
             if let Some(open) = self.open.borrow().as_ref() {
                 open.content.add_css_class(classes::BORDERLESS);
             }
@@ -579,7 +578,7 @@ impl LayerPopover {
         motion.settle();
         self.motion.set(motion);
 
-        self.shell.set_outline(0.0, gdk::RGBA::TRANSPARENT);
+        self.shell.set_outline(0.0);
         if let Some(open) = self.open.borrow().as_ref() {
             open.content.remove_css_class(classes::BORDERLESS);
         }

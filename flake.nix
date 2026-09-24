@@ -1,8 +1,10 @@
 {
-  description = "topbar - GNOME Shell-style top bar for niri (GTK4 + layer-shell)";
+  description = "topbar - GNOME Shell-style top bar for Niri and Hyprland (GTK4 + layer-shell)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+    # Development compositor only; stable package/build dependencies stay unchanged.
+    nixpkgs-unstable.url = "github:NixOS/nixpkgs/44a91898084f46797b5fac650c7e8c9ac38c43d4";
     crane.url = "github:ipetkov/crane";
     git-hooks = {
       url = "github:cachix/git-hooks.nix";
@@ -14,6 +16,7 @@
     {
       self,
       nixpkgs,
+      nixpkgs-unstable,
       crane,
       git-hooks,
     }:
@@ -96,7 +99,7 @@
             )
           '';
           meta = {
-            description = "GNOME Shell-inspired GTK4 top bar for niri";
+            description = "GNOME Shell-inspired GTK4 top bar for Niri and Hyprland";
             license = lib.licenses.mit;
             mainProgram = "topbar";
             platforms = [ "x86_64-linux" ];
@@ -174,6 +177,7 @@
         packages = with pkgs; [
           rust-analyzer
           niri
+          nixpkgs-unstable.legacyPackages.${system}.hyprland
           grim
           headsetcontrol
           brightnessctl

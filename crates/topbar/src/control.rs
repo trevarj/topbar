@@ -177,7 +177,7 @@ where
 
 /// The connector of the monitor the user is looking at.
 fn focused_connector(services: &Services) -> Option<String> {
-    let workspaces = services.niri.workspaces();
+    let workspaces = services.compositor.workspaces();
     let focused = workspaces.borrow().focused_output.clone();
     let connectors = toast::connectors();
     toast::hosting_output(focused.as_deref(), &connectors).map(ToString::to_string)
@@ -239,7 +239,7 @@ fn snapshot(services: &Services) -> serde_json::Value {
     let media = media.borrow();
     let notifications = services.notifications.state();
     let notifications = notifications.borrow();
-    let workspaces = services.niri.workspaces();
+    let workspaces = services.compositor.workspaces();
     let workspaces = workspaces.borrow();
     let tray = services.tray.state();
     let tray = tray.borrow();
@@ -282,7 +282,8 @@ fn snapshot(services: &Services) -> serde_json::Value {
             "unseen": notifications.unseen_count,
             "do_not_disturb": notifications.dnd,
         },
-        "niri": {
+        "compositor": {
+            "backend": services.compositor.backend(),
             "connected": workspaces.connected,
             "focused_output": workspaces.focused_output,
             "outputs": workspaces.outputs.len(),

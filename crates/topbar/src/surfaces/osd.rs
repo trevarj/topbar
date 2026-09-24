@@ -31,7 +31,7 @@ use gtk4::prelude::*;
 use gtk4::{Align, Label, Orientation, Window, gdk};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use topbar_core::Config;
-use topbar_core::theme::{Rgb, parse_hex_color};
+use topbar_core::theme::{Palette, Rgb};
 use topbar_services::{AudioState, BrightnessState, InhibitorState, Services};
 use tracing::debug;
 
@@ -520,7 +520,7 @@ impl OsdSurface {
     /// The focused output, exactly as the banners do it, so a media key pressed
     /// on one screen does not light up all of them.
     fn is_host(&self) -> bool {
-        let workspaces = self.services.niri.workspaces();
+        let workspaces = self.services.compositor.workspaces();
         let focused = workspaces.borrow().focused_output.clone();
         let connectors = toast::connectors();
         toast::hosting_output(focused.as_deref(), &connectors) == Some(self.connector.as_str())
@@ -707,15 +707,15 @@ fn set_icon(image: &gtk4::Image, event: OsdEvent) {
 
 /// Colours the bar paints itself with, from the configured palette.
 fn colors(config: &Config) -> BarColors {
+    let palette = Palette::from_config(config);
     BarColors {
-        accent: rgba(&config.theme.accent, Rgb::new(0x70, 0xb4, 0x9b)),
-        urgent: rgba(&config.theme.states.urgent, Rgb::new(0xef, 0x44, 0x44)),
+        accent: rgba(palette.accent),
+        urgent: rgba(palette.urgent),
     }
 }
 
-/// Parse a configured hex colour into a GDK one.
-fn rgba(value: &str, fallback: Rgb) -> gdk::RGBA {
-    let color = parse_hex_color(value).unwrap_or(fallback);
+/// Convert a resolved color into a GDK one.
+fn rgba(color: Rgb) -> gdk::RGBA {
     gdk::RGBA::new(
         f32::from(color.r) / 255.0,
         f32::from(color.g) / 255.0,

@@ -62,7 +62,7 @@ fn live_config_bar_and_theme_values_survive() {
     assert_eq!(config.bar.size, 36);
     assert_eq!(config.bar.spacing, 2);
     assert_eq!(config.bar.inset, 4);
-    assert_eq!(config.bar.background_color, "#000000");
+    assert_eq!(config.bar.background_color.as_deref(), Some("#000000"));
     assert_eq!(config.bar.background_opacity, 1.0);
 
     assert_eq!(config.widgets.border_radius, 50);

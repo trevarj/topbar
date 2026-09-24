@@ -85,9 +85,8 @@ fn start(
         return None;
     }
 
-    prefer_dark();
     pin_icon_theme(&config.current().theme.icons.theme);
-    style::apply(&display, &style::generate(&config.current()));
+    style::apply(&config.current());
     // Before any surface exists: an attachment made against a manager that has
     // not been initialised is inert for good.
     wayland::blur::init(&display, config.current().theme.blur);
@@ -139,21 +138,6 @@ fn start(
         }
     );
     Some(manager)
-}
-
-/// Ask the stock theme for its dark variant.
-///
-/// The panel styles everything it paints itself, so this changes nothing about
-/// the bar, the popovers or the banners. It is about the handful of controls
-/// that come from GTK rather than from the generated sheet — a switch, a
-/// dropdown, a disabled button — which would otherwise arrive in Adwaita's
-/// light colours and sit as white rectangles in a black popover. There is one
-/// palette in v2 and it is dark; this is the toolkit being told so.
-fn prefer_dark() {
-    let Some(settings) = gtk4::Settings::default() else {
-        return;
-    };
-    settings.set_gtk_application_prefer_dark_theme(true);
 }
 
 /// Pin the icon theme to what `[theme.icons] theme` names.

@@ -13,7 +13,7 @@ use gtk4::{
 };
 use topbar_core::config::KeyboardLayoutConfig;
 use topbar_core::xkb_names;
-use topbar_services::{KeyboardLayoutSnapshot, NiriHandle};
+use topbar_services::{CompositorHandle, KeyboardLayoutSnapshot};
 use tracing::debug;
 
 use crate::anim::{Animation, AnimationParams, Easing};
@@ -47,7 +47,7 @@ struct State {
     fade: Animation,
     /// The text on screen, so an unchanged snapshot does not re-fade it.
     shown: RefCell<String>,
-    niri: NiriHandle,
+    compositor: CompositorHandle,
     long_format: bool,
 }
 
@@ -71,23 +71,27 @@ impl KeyboardLayoutWidget {
             label,
             tooltip: shell.set_tooltip(""),
             shown: RefCell::new(String::new()),
-            niri: context.services.niri.handle().clone(),
+            compositor: context.services.compositor.handle(),
             long_format: settings.format == "long",
         });
 
         let wrapper = shell.root().clone();
-        let binding = bridge::bind_state(shell.root(), context.services.niri.keyboard_layout(), {
-            let state = Rc::clone(&state);
-            move |root: &gtk4::Box, snapshot: &KeyboardLayoutSnapshot| {
-                // One layout is not a choice, so there is nothing to show.
-                root.set_visible(snapshot.is_switchable());
-                if !snapshot.is_switchable() {
-                    return;
+        let binding = bridge::bind_state(
+            shell.root(),
+            context.services.compositor.keyboard_layout(),
+            {
+                let state = Rc::clone(&state);
+                move |root: &gtk4::Box, snapshot: &KeyboardLayoutSnapshot| {
+                    // One layout is not a choice, so there is nothing to show.
+                    root.set_visible(snapshot.is_switchable());
+                    if !snapshot.is_switchable() {
+                        return;
+                    }
+                    state.render(snapshot);
+                    set_class(&wrapper, classes::DISCONNECTED, !snapshot.connected);
                 }
-                state.render(snapshot);
-                set_class(&wrapper, classes::DISCONNECTED, !snapshot.connected);
-            }
-        });
+            },
+        );
 
         install_gestures(shell.root(), &state);
 
@@ -135,24 +139,24 @@ impl State {
     /// Move to the next layout, reporting failure through the one action path.
     fn switch_next(&self) {
         debug!("switching to the next keyboard layout");
-        let niri = self.niri.clone();
+        let compositor = self.compositor.clone();
         bridge::act(
             ActionScope::Toast {
                 widget: WIDGET_NAME,
             },
-            async move { niri.switch_layout_next().await },
+            async move { compositor.switch_layout_next().await },
         );
     }
 
     /// Move to the previous layout.
     fn switch_previous(&self) {
         debug!("switching to the previous keyboard layout");
-        let niri = self.niri.clone();
+        let compositor = self.compositor.clone();
         bridge::act(
             ActionScope::Toast {
                 widget: WIDGET_NAME,
             },
-            async move { niri.switch_layout_prev().await },
+            async move { compositor.switch_layout_prev().await },
         );
     }
 }
@@ -285,13 +289,13 @@ mod tests {
     fn a_single_layout_is_not_switchable() {
         let one = KeyboardLayoutSnapshot {
             connected: true,
-            names: vec!["English (US)".into()],
-            current_idx: 0,
+            current_name: Some("English (US)".into()),
+            layout_count: 1,
         };
         assert!(!one.is_switchable());
 
         let two = KeyboardLayoutSnapshot {
-            names: vec!["English (US)".into(), "Russian".into()],
+            layout_count: 2,
             ..one
         };
         assert!(two.is_switchable());
@@ -299,11 +303,11 @@ mod tests {
     }
 
     #[test]
-    fn an_out_of_range_index_does_not_panic() {
+    fn an_unknown_layout_stays_displayable() {
         let snapshot = KeyboardLayoutSnapshot {
             connected: true,
-            names: vec!["English (US)".into(), "Russian".into()],
-            current_idx: 7,
+            current_name: None,
+            layout_count: 2,
         };
         assert_eq!(snapshot.current(), None);
         assert_eq!(short_name(snapshot.current().unwrap_or(UNKNOWN)), UNKNOWN);

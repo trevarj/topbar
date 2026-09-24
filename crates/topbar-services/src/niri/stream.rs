@@ -28,8 +28,9 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::codec::{Framed, LinesCodec};
 use tracing::{debug, info, warn};
 
+use crate::compositor::{KeyboardLayoutSnapshot, WorkspacesSnapshot};
 use crate::error::SvcError;
-use crate::niri::snapshot::{self, KeyboardLayoutSnapshot, WorkspacesSnapshot};
+use crate::niri::snapshot;
 
 /// First reconnect delay after the stream drops.
 const BACKOFF_START: Duration = Duration::from_millis(250);
@@ -299,7 +300,7 @@ mod tests {
     #[test]
     fn occupancy_comes_from_the_window_map() {
         let snapshot = snapshot(&replay(BURST));
-        let occupied: Vec<u8> = snapshot
+        let occupied: Vec<usize> = snapshot
             .for_output("eDP-1")
             .iter()
             .filter(|view| view.has_windows)
@@ -336,12 +337,12 @@ mod tests {
 
         let snapshot = snapshot(&state);
         let views = snapshot.for_output("eDP-1");
-        let active: Vec<u8> = views
+        let active: Vec<usize> = views
             .iter()
             .filter(|view| view.is_active)
             .map(|view| view.idx)
             .collect();
-        let focused: Vec<u8> = views
+        let focused: Vec<usize> = views
             .iter()
             .filter(|view| view.is_focused)
             .map(|view| view.idx)
@@ -370,7 +371,7 @@ mod tests {
         );
 
         let snapshot = snapshot(&state);
-        let internal_active: Vec<u8> = snapshot
+        let internal_active: Vec<usize> = snapshot
             .for_output("eDP-1")
             .iter()
             .filter(|view| view.is_active)
@@ -430,7 +431,7 @@ mod tests {
     fn keyboard_layout_switching_tracks_the_index() {
         let mut state = replay(BURST);
         let layouts = snapshot::keyboard_layout(&state, true);
-        assert_eq!(layouts.names, vec!["English (US)", "Russian"]);
+        assert_eq!(layouts.layout_count, 2);
         assert_eq!(layouts.current(), Some("English (US)"));
         assert!(layouts.is_switchable());
 
@@ -441,6 +442,18 @@ mod tests {
         assert_eq!(
             snapshot::keyboard_layout(&state, true).current(),
             Some("Russian")
+        );
+        state
+            .keyboard_layouts
+            .keyboard_layouts
+            .as_mut()
+            .unwrap()
+            .current_idx = 200;
+        let invalid = snapshot::keyboard_layout(&state, true);
+        assert_eq!(invalid.current(), None);
+        assert_eq!(
+            invalid.layout_count, 2,
+            "an invalid current index must not lose configured choices"
         );
     }
 

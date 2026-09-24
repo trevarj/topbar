@@ -14,15 +14,15 @@
 //!
 //! One thing did change on the way across, and [`scale_greys`] says why: v1
 //! scaled by `target / 255`, which brings a *light* icon down — right for the
-//! light themes v1 also had, and a no-op on the near-black icons this
-//! dark-only panel actually has trouble with.
+//! light themes, and a no-op on the near-black icons a dark panel
+//! actually has trouble with.
 //!
 //! Everything except [`texture`] and [`apply`] is pure, and tested as such.
 
 use gtk4::gdk;
 use gtk4::{Image, gdk_pixbuf, glib};
 use topbar_core::Config;
-use topbar_core::theme::{Rgb, parse_hex_color};
+use topbar_core::theme::{Palette, Rgb};
 use topbar_services::{IconView, Pixmap};
 use tracing::debug;
 
@@ -56,14 +56,11 @@ impl Contrast {
     /// foreground is what every other glyph beside it is drawn in — so an icon
     /// lifted to meet it lands in the company it is keeping.
     pub fn of(config: &Config) -> Self {
-        let background = parse_hex_color(&config.bar.background_color)
-            .unwrap_or(Rgb::new(0, 0, 0))
-            .relative_luminance();
+        let palette = Palette::from_config(config);
+        let Rgb { r, g, b } = palette.foreground;
         Self {
-            background,
-            // The panel's foreground is plain white, GNOME Shell style; the
-            // stylesheet says the same thing in its own units.
-            target: 255,
+            background: palette.bar.relative_luminance(),
+            target: ((u16::from(r) + u16::from(g) + u16::from(b)) / 3) as u8,
         }
     }
 
@@ -369,18 +366,18 @@ mod tests {
     #[test]
     fn the_panels_own_colours_are_what_an_icon_is_measured_against() {
         let mut config = Config::default();
-        config.bar.background_color = "#000000".to_string();
+        config.bar.background_color = Some("#000000".to_string());
         let contrast = Contrast::of(&config);
         assert_eq!(contrast.background, 0.0);
         assert_eq!(contrast.target, 255);
 
-        config.bar.background_color = "#ffffff".to_string();
+        config.bar.background_color = Some("#ffffff".to_string());
         assert!(
             Contrast::of(&config).background > 0.9,
             "a white bar is a bright bar"
         );
 
-        config.bar.background_color = "not a colour".to_string();
+        config.bar.background_color = Some("not a colour".to_string());
         assert_eq!(
             Contrast::of(&config).background,
             0.0,
@@ -480,6 +477,23 @@ mod tests {
             "the gradient is still a gradient: {strengths:?}"
         );
         assert!(strengths[2] > 0x80, "and the strongest is now visible");
+    }
+
+    #[test]
+    fn light_palette_darkens_only_greys_and_preserves_badges_and_alpha() {
+        let config =
+            Config::parse("[theme]\nmode = \"light\"\n[theme.palette]\nforeground = \"#123\"")
+                .unwrap()
+                .0;
+        let contrast = Contrast::of(&config);
+        assert_eq!(contrast.target, 34);
+        let mut rgba = solid(8, [240, 240, 240, 255]);
+        let badge = (3 * 8 + 3) * 4;
+        rgba[badge..badge + 4].copy_from_slice(&[230, 20, 60, 190]);
+        lift(&mut rgba, 8, 8, contrast);
+        assert!(rgba[0] < 100);
+        assert_eq!(rgba[3], 255);
+        assert_eq!(&rgba[badge..badge + 4], &[230, 20, 60, 190]);
     }
 
     #[test]

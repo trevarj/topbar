@@ -22,6 +22,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use crate::config::{Config, CustomWidgetConfig};
+use crate::theme::Palette;
 
 /// Everything that differs between two configurations.
 ///
@@ -68,12 +69,19 @@ impl ConfigDelta {
     pub fn between(old: &Config, new: &Config) -> Self {
         let mut delta = Self::default();
 
-        // `[bar]` feeds both the stylesheet and the window geometry, so any
-        // change in it is both. Comparing the section as a whole rather than
-        // key by key is the point: a key added to `BarConfig` tomorrow is
-        // classified today.
+        // Color-only bar changes do not destroy open clock/Quick Settings menus.
         if old.bar != new.bar {
-            delta.bar = true;
+            let a = &old.bar;
+            let b = &new.bar;
+            delta.bar = a.position != b.position
+                || a.size != b.size
+                || a.spacing != b.spacing
+                || a.screen_margin != b.screen_margin
+                || a.inset != b.inset
+                || a.padding != b.padding
+                || a.border_radius != b.border_radius
+                || a.popover_offset != b.popover_offset
+                || a.background_opacity != b.background_opacity;
             delta.style = true;
         }
 
@@ -106,11 +114,21 @@ impl ConfigDelta {
             || old_theme.icons != new_theme.icons
             || old_theme.states != new_theme.states
             || old_theme.typography != new_theme.typography
+            || old_theme.palette != new_theme.palette
         {
             delta.style = true;
         }
 
         delta.osd = old.osd != new.osd;
+        let before = Palette::from_config(old);
+        let after = Palette::from_config(new);
+        if before.bar != after.bar || before.urgent != after.urgent {
+            delta.widgets.insert("workspaces".into());
+        }
+        if before.bar != after.bar || before.foreground != after.foreground {
+            delta.widgets.insert("tray".into());
+        }
+        delta.osd |= before.accent != after.accent || before.urgent != after.urgent;
         delta.audio = old.audio != new.audio;
         delta.updates = old.updates != new.updates;
         delta.advanced = old.advanced != new.advanced;
@@ -262,16 +280,48 @@ mod tests {
     }
 
     #[test]
-    fn the_accent_is_a_stylesheet_swap_and_nothing_else() {
+    fn an_accent_refreshes_osd_without_destroying_popovers() {
         let mut new = live();
         new.theme.accent = "#ff0000".to_string();
         let delta = ConfigDelta::between(&live(), &new);
 
         assert!(delta.style);
-        assert!(delta.theme_only(), "{delta:?}");
+        assert!(delta.osd);
         assert!(!delta.rebuilds_bars());
         assert!(delta.widgets.is_empty());
-        assert_eq!(delta.to_string(), "styling");
+    }
+
+    #[test]
+    fn palette_changes_refresh_only_components_with_cached_colors() {
+        let old = Config::default();
+        let mut new = old.clone();
+        new.theme.mode = "light".into();
+        let delta = ConfigDelta::between(&old, &new);
+        assert!(delta.style && !delta.rebuilds_bars());
+        assert_eq!(
+            delta.widgets,
+            BTreeSet::from(["tray".into(), "workspaces".into()])
+        );
+        assert!(!delta.osd, "a fixed accent and urgency have not changed");
+        new = old.clone();
+        new.theme.states.urgent = "#123".into();
+        let delta = ConfigDelta::between(&old, &new);
+        assert!(delta.style && delta.osd && !delta.rebuilds_bars());
+        assert_eq!(delta.widgets, BTreeSet::from(["workspaces".into()]));
+        new = old.clone();
+        new.bar.background_color = Some("#abc".into());
+        assert!(!ConfigDelta::between(&old, &new).rebuilds_bars());
+        new = old.clone();
+        new.theme.palette.surface = Some("#456".into());
+        assert!(ConfigDelta::between(&old, &new).theme_only());
+        let mut old = old;
+        old.theme.accent = "none".into();
+        new = old.clone();
+        new.theme.palette.foreground = Some("#123".into());
+        new.osd.show_value = !old.osd.show_value;
+        let delta = ConfigDelta::between(&old, &new);
+        assert!(delta.osd && delta.style && !delta.rebuilds_bars());
+        assert_eq!(delta.widgets, BTreeSet::from(["tray".into()]));
     }
 
     #[test]

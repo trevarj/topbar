@@ -295,8 +295,11 @@ fn fire(row: Row, services: &Services) {
             attempt(row.slot(), async move { power.act(action).await });
         }
         None => {
-            let niri = services.niri.handle().clone();
-            attempt(row.slot(), async move { niri.quit_compositor().await });
+            let compositor = services.compositor.handle();
+            attempt(
+                row.slot(),
+                async move { compositor.quit_compositor().await },
+            );
         }
     }
 }

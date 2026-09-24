@@ -149,7 +149,7 @@ impl ToastSurface {
                 }
             }
         });
-        let workspaces = bridge::bind_state(&surface.stack, services.niri.workspaces(), {
+        let workspaces = bridge::bind_state(&surface.stack, services.compositor.workspaces(), {
             let surface = Rc::downgrade(&surface);
             move |_, _| {
                 if let Some(surface) = surface.upgrade() {
@@ -171,7 +171,7 @@ impl ToastSurface {
 
     /// Whether banners belong on this monitor right now.
     fn is_host(&self) -> bool {
-        let workspaces = self.services.niri.workspaces();
+        let workspaces = self.services.compositor.workspaces();
         let focused = workspaces.borrow().focused_output.clone();
         let connectors = connectors();
         hosting_output(focused.as_deref(), &connectors) == Some(self.connector.as_str())

@@ -11,16 +11,16 @@
 //!
 //! | changed | done |
 //! |---|---|
-//! | `[theme]` colours, fonts, `[widgets]` styling | regenerate the sheet, swap the one provider |
+//! | theme/palette colours, fonts, widget styling | swap CSS/polarity and refresh affected cached-color components |
 //! | `theme.animations` / `ripple` | flip the motion switches |
 //! | `theme.blur` | re-bind (or release) the blur protocol, rebuild the bars |
 //! | one `[widgets.<name>]` section | rebuild that widget on every bar |
-//! | `[bar]`, the placement arrays, `[advanced]` | rebuild the bars |
+//! | bar geometry, placement, Pango rendering | rebuild bars; compositor selector changes reject reload |
 //! | `[osd]` | rebuild each bar's capsule |
 //! | `[audio]`, `[updates]`, per-widget intervals | tell the service |
 //!
-//! The cheap routes are the common ones: a changed accent colour touches no
-//! widget, and a changed `clock.format` touches one. Nothing rebuilds a bar
+//! The cheap routes are common: an accent touches CSS and OSD only,
+//! and a changed `clock.format` touches one widget. Nothing rebuilds a bar
 //! that does not have to, because a rebuilt bar closes whatever popover was
 //! open and restarts every widget's timers.
 //!
@@ -67,6 +67,13 @@ pub struct Reloader {
     source: Option<PathBuf>,
 }
 
+fn check_startup_settings(previous: &Config, candidate: &Config) -> Result<(), String> {
+    if previous.advanced.compositor != candidate.advanced.compositor {
+        return Err("advanced.compositor is startup-only; restart topbar to change it (no settings applied)".into());
+    }
+    Ok(())
+}
+
 impl Reloader {
     /// Describe the running panel.
     pub fn new(
@@ -95,7 +102,7 @@ impl Reloader {
         for warning in &load.warnings {
             warn!("{warning}");
         }
-        Ok(self.install(load))
+        self.install(load)
     }
 
     /// Reload whenever the configuration file changes.
@@ -189,7 +196,13 @@ impl Reloader {
                         for warning in &load.warnings {
                             warn!("{warning}");
                         }
-                        info!("{}", reloader.install(load));
+                        match reloader.install(load) {
+                            Ok(message) => info!("{message}"),
+                            Err(error) => bridge::announce(
+                                &format!("config error: {}", first_line(&error)),
+                                &error,
+                            ),
+                        }
                     }
                     // The running configuration is left exactly as it was. One
                     // banner, the first error, and the whole list in the log.
@@ -205,8 +218,9 @@ impl Reloader {
     }
 
     /// Apply an already-loaded configuration, and say what that took.
-    fn install(&self, load: ConfigLoad) -> String {
+    fn install(&self, load: ConfigLoad) -> Result<String, String> {
         let previous = self.config.current();
+        check_startup_settings(&previous, &load.config)?;
         let delta = ConfigDelta::between(&previous, &load.config);
         let source = match &load.source {
             Some(path) => path.display().to_string(),
@@ -215,7 +229,7 @@ impl Reloader {
 
         if delta.is_empty() {
             info!("reloaded {source}; nothing changed");
-            return format!("reloaded {source} (nothing changed)");
+            return Ok(format!("reloaded {source} (nothing changed)"));
         }
         info!("reloading {source}: {delta}");
 
@@ -239,11 +253,7 @@ impl Reloader {
         self.reconfigure_services(&previous, &config, &delta);
 
         if delta.style {
-            match gtk4::gdk::Display::default() {
-                Some(display) => style::apply(&display, &style::generate(&config)),
-                // Unreachable while a bar is on screen; not worth failing over.
-                None => warn!("the stylesheet was not swapped: there is no display"),
-            }
+            style::apply(&config);
         }
         if delta.motion {
             anim::set_animations_enabled(config.theme.animations);
@@ -267,7 +277,7 @@ impl Reloader {
             }
         }
 
-        format!("reloaded {source} ({delta})")
+        Ok(format!("reloaded {source} ({delta})"))
     }
 
     /// Switch blur on or off under a running panel.
@@ -374,6 +384,17 @@ fn first_line(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compositor_changes_reject_the_entire_candidate_before_installation() {
+        let previous = Config::default();
+        let mut candidate = previous.clone();
+        candidate.theme.mode = "light".into();
+        candidate.advanced.compositor = "hyprland".into();
+        assert!(check_startup_settings(&previous, &candidate).is_err());
+        candidate.advanced.compositor = previous.advanced.compositor.clone();
+        assert!(check_startup_settings(&previous, &candidate).is_ok());
+    }
 
     #[test]
     fn a_one_line_failure_is_reported_as_it_is() {

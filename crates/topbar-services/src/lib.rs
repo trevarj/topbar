@@ -14,11 +14,13 @@ pub mod battery;
 pub mod bluetooth;
 pub mod brightness;
 pub mod change;
+pub mod compositor;
 pub mod connectivity;
 pub mod crypto;
 pub mod custom;
 pub mod error;
 pub mod headset;
+pub mod hyprland;
 pub mod inhibitor;
 pub mod ipc;
 mod lazy;
@@ -74,6 +76,10 @@ pub use bluetooth::{
 };
 pub use brightness::{Brightness, BrightnessHandle, BrightnessState};
 pub use change::{Change, ChangeSource};
+pub use compositor::{
+    Compositor, CompositorHandle, KeyboardLayoutSnapshot, WorkspaceId, WorkspaceView,
+    WorkspacesSnapshot,
+};
 pub use connectivity::{Connectivity, ConnectivityState};
 pub use crypto::{Asset, Crypto, CryptoHandle, CryptoState, Entry, EntryQuote, Quote};
 pub use custom::{CustomClass, CustomDisplay, CustomExec, CustomState, CustomWidgets};
@@ -85,7 +91,7 @@ pub use network::{
     Access, ApView, Network, NetworkHandle, NetworkState, Pending, PendingPrompt, Secret, VpnKind,
     VpnView, WifiState, WiredState,
 };
-pub use niri::{KeyboardLayoutSnapshot, Niri, NiriHandle, WorkspaceView, WorkspacesSnapshot};
+pub use niri::{Niri, NiriHandle};
 pub use notifications::{
     Action, CloseReason, GroupView, IconSource, ImageData, NotifState, NotificationView,
     Notifications, NotificationsHandle, ToastView, Urgency,

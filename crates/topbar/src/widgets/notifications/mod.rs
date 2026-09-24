@@ -45,7 +45,7 @@ pub fn activate(
         .into_iter()
         .map(str::to_owned)
         .collect();
-    let niri = services.niri.handle().clone();
+    let compositor = services.compositor.handle();
 
     // The token has to be asked for here: it needs the surface the click landed
     // on, and surfaces belong to the main thread.
@@ -66,7 +66,7 @@ pub fn activate(
         // After the action, not before: an application asked to open a
         // conversation should pick which window that is before we raise one.
         let identities: Vec<&str> = identities.iter().map(String::as_str).collect();
-        niri.focus_app(&identities).await?;
+        compositor.focus_app(&identities).await?;
         Ok(())
     });
 

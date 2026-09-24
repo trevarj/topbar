@@ -21,7 +21,7 @@ inset = 4            # Gap between the bar edge and the first/last section
 padding = 0          # Extra vertical padding inside the bar
 border_radius = 0    # Bar corner radius in pixels
 popover_offset = 1   # Gap between the bar and popovers anchored to it
-background_color = "#000000"
+# background_color = "#000000" # Optional override; unset inherits theme.palette.background
 background_opacity = 1.0
 
 [widgets]
@@ -141,12 +141,20 @@ show_week_numbers = true
 # on_click = "nm-connection-editor"
 
 [theme]
-# v2 ships a single dark palette; "dark" is the only supported mode.
+# Genuine "dark" or "light" mode; neutral defaults follow the selected mode.
 mode = "dark"
 accent = "#3584e4" # A hex color, or "none" for monochrome
 animations = true  # Master switch for transitions and animations
 ripple = true      # Material-style ripple on press
 blur = false       # Ask the compositor to blur behind panel surfaces
+
+# Optional neutral roles, accepting #rgb or #rrggbb (no alpha or "none").
+# Dark defaults: #000000 / #1e1e22 / #ffffff
+# Light defaults: #ffffff / #f1f1f3 / #000000
+# [theme.palette]
+# background = "#000000"
+# surface = "#1e1e22"
+# foreground = "#ffffff"
 
 [theme.icons]
 theme = "Adwaita" # GTK icon theme name
@@ -196,5 +204,5 @@ check_interval = 3600 # Seconds between checks (minimum 60)
 # update_count_command = "checkupdates | wc -l"
 
 [advanced]
-compositor = "auto"          # "auto" or "niri"
+compositor = "auto"          # Startup-only: "auto", "niri", or "hyprland"
 pango_font_rendering = false # Apply Pango font attributes instead of GTK CSS

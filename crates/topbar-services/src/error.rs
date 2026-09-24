@@ -13,20 +13,30 @@ pub enum SvcError {
     #[error("NIRI_SOCKET is not set; the panel is not running under niri")]
     NoNiriSocket,
 
+    /// Desktop markers and endpoint environment cannot select one backend.
+    #[error("compositor selection failed: {0}")]
+    CompositorSelection(String),
+
+    /// The selected Hyprland session did not export its endpoint.
+    #[error(
+        "Hyprland needs XDG_RUNTIME_DIR and HYPRLAND_INSTANCE_SIGNATURE; restart topbar in the selected session"
+    )]
+    NoHyprlandSocket,
+
     /// The socket could not be reached, or the connection broke mid-request.
-    #[error("niri socket I/O failed: {0}")]
+    #[error("compositor socket I/O failed: {0}")]
     Io(#[source] std::io::Error),
 
     /// The compositor did not answer in time.
-    #[error("niri did not answer within {0:?}")]
+    #[error("compositor did not answer within {0:?}")]
     Timeout(Duration),
 
     /// The compositor answered, refusing the request.
-    #[error("niri refused the request: {0}")]
+    #[error("compositor refused the request: {0}")]
     Rejected(String),
 
     /// The compositor answered with something we cannot read.
-    #[error("unreadable reply from niri: {0}")]
+    #[error("unreadable reply from compositor: {0}")]
     Protocol(String),
 
     /// The session bus could not be reached, or refused a request.
@@ -147,7 +157,10 @@ impl SvcError {
     /// accompanies the toast, not in the toast.
     pub fn user_message(&self) -> &'static str {
         match self {
-            Self::NoNiriSocket | Self::Io(_) | Self::Timeout(_) => "Could not reach the compositor",
+            Self::NoNiriSocket | Self::NoHyprlandSocket | Self::Io(_) | Self::Timeout(_) => {
+                "Could not reach the compositor"
+            }
+            Self::CompositorSelection(_) => "Could not select the compositor",
             Self::Rejected(_) => "The compositor refused the request",
             Self::Protocol(_) => "The compositor sent an unexpected reply",
             Self::Bus(_) => "Could not reach the session bus",

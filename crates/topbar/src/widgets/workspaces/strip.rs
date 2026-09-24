@@ -17,6 +17,7 @@ use std::cell::{Cell, OnceCell, RefCell};
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
 use gtk4::{gdk, glib, graphene, gsk, pango};
+use topbar_services::WorkspaceId;
 
 use crate::anim::{Animation, AnimationParams, Easing};
 use crate::style::classes;
@@ -46,6 +47,8 @@ pub struct StripColors {
     pub urgent: gdk::RGBA,
     /// Text color on top of the active pill.
     pub on_active: gdk::RGBA,
+    /// Contrast-preserving text on urgent pills.
+    pub on_urgent: gdk::RGBA,
 }
 
 impl Default for StripColors {
@@ -53,6 +56,7 @@ impl Default for StripColors {
         Self {
             urgent: gdk::RGBA::RED,
             on_active: gdk::RGBA::BLACK,
+            on_urgent: gdk::RGBA::BLACK,
         }
     }
 }
@@ -60,7 +64,7 @@ impl Default for StripColors {
 /// One indicator, resolved to what the strip needs to draw it.
 #[derive(Debug, Clone)]
 struct DrawSlot {
-    id: u64,
+    id: WorkspaceId,
     layout: Option<pango::Layout>,
     /// Natural width while inactive.
     width: f32,
@@ -197,7 +201,7 @@ mod imp {
                 };
                 let (text_width, text_height) = layout.pixel_size();
                 let text_color = if slot.is_urgent {
-                    colors.on_active
+                    colors.on_urgent
                 } else {
                     blend(inactive, colors.on_active, activeness)
                 };
@@ -283,7 +287,8 @@ impl WorkspaceStrip {
     /// Show `slots`, animating from whatever is on screen right now.
     pub fn set_slots(&self, slots: &[Slot]) {
         let imp = self.imp();
-        let previous_ids: Vec<u64> = imp.slots.borrow().iter().map(|slot| slot.id).collect();
+        let previous_ids: Vec<WorkspaceId> =
+            imp.slots.borrow().iter().map(|slot| slot.id).collect();
         let structural = previous_ids.len() != slots.len()
             || previous_ids
                 .iter()

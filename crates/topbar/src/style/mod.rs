@@ -4,4 +4,4 @@ pub mod classes;
 pub mod icons;
 pub(crate) mod stylesheet;
 
-pub use stylesheet::{POPOVER_RADIUS, apply, font_size, generate, surface_border, window_height};
+pub use stylesheet::{POPOVER_RADIUS, apply, font_size, window_height};

@@ -10,8 +10,8 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::error;
 
+use crate::compositor::{KeyboardLayoutSnapshot, WorkspacesSnapshot};
 pub use requests::NiriHandle;
-pub use snapshot::{KeyboardLayoutSnapshot, WorkspaceView, WorkspacesSnapshot};
 
 /// Everything the panel needs from niri.
 ///
@@ -202,7 +202,7 @@ mod tests {
             .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
     }
 
-    fn active_idx(snapshot: &WorkspacesSnapshot) -> Option<u8> {
+    fn active_idx(snapshot: &WorkspacesSnapshot) -> Option<usize> {
         snapshot
             .for_output("eDP-1")
             .iter()
