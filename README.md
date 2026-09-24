@@ -294,11 +294,14 @@ used in a placement array. A section needs at least one of `exec`, `label` or
 
 | Key | Default | Meaning |
 |---|---|---|
-| `mode` | `"dark"` | Accepted for compatibility; `"dark"` is the only value honoured. |
+| `mode` | `"dark"` | `"dark"` or `"light"`; changes the panel palette and GTK polarity. |
 | `accent` | `"#3584e4"` | A hex colour, or `"none"` for monochrome. |
 | `animations` | `true` | Master switch for transitions and animations. |
 | `ripple` | `true` | Material-style ripple on press. |
 | `blur` | `false` | Ask the compositor to blur behind panel surfaces. |
+
+`[theme.palette]` may override `background`, `surface` and `foreground` with
+hex colours; omitted roles use the selected mode's defaults.
 
 ### `[theme.icons]`, `[theme.states]`, `[theme.typography]`
 
@@ -383,8 +386,8 @@ byte-for-byte, but a handful of things around it have to move.
    popover edits the list of coins without touching your configuration file.
    The `custom-*` engine is not going anywhere if you would rather keep the
    script.
-7. **Features v1 had that v2 does not.** Material You and the light and GTK
-   theme modes, wallpaper colour extraction, the Material Symbols icon font,
+7. **Features v1 had that v2 does not.** Material You and GTK-following
+   theme mode, wallpaper colour extraction, the Material Symbols icon font,
    the outline system, widget groups, the `outputs` allowlist, the bottom bar
    position, cellular, MPD and the cava visualiser are gone. Their keys still
    load and each one tells you what happened to it; `bar.position = "bottom"`

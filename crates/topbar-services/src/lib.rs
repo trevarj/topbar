@@ -20,7 +20,6 @@ pub mod crypto;
 pub mod custom;
 pub mod error;
 pub mod headset;
-pub mod hyprland;
 pub mod inhibitor;
 pub mod ipc;
 mod lazy;

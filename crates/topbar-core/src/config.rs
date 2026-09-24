@@ -49,7 +49,7 @@ pub const SUPPORTED_WIDGETS: &[&str] = &[
 pub const SUPPORTED_CRYPTO_ASSETS: &[&str] = &["btc", "eth", "xmr"];
 
 const VALID_OSD_POSITIONS: &[&str] = &["bottom", "left", "right", "top"];
-const VALID_COMPOSITORS: &[&str] = &["auto", "niri", "hyprland"];
+const VALID_COMPOSITORS: &[&str] = &["auto", "niri"];
 const VALID_WEATHER_UNITS: &[&str] = &["c", "celsius", "f", "fahrenheit"];
 const VALID_LABEL_TYPES: &[&str] = &["none", "index", "name"];
 const VALID_LAYOUT_FORMATS: &[&str] = &["short", "long"];
@@ -2149,7 +2149,7 @@ const ADVANCED_KEYS: &[&str] = &["compositor", "pango_font_rendering"];
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AdvancedConfig {
-    /// Startup-only backend: `"auto"`, `"niri"` or `"hyprland"`.
+    /// Startup-only backend: `"auto"` or `"niri"`.
     pub compositor: String,
     /// Apply Pango font attributes directly instead of relying on GTK CSS.
     pub pango_font_rendering: bool,
@@ -2288,10 +2288,10 @@ mod tests {
         assert!(Config::parse("[theme]\npalette = false").is_err());
         let (_, warnings) = parse_ok("[theme.palette]\nunknown = \"#fff\"");
         assert_eq!(warning_keys(&warnings), ["theme.palette.unknown"]);
-        for backend in ["auto", "niri", "hyprland"] {
+        for backend in ["auto", "niri"] {
             assert!(Config::parse(&format!("[advanced]\ncompositor = {backend:?}")).is_ok());
         }
-        assert!(Config::parse("[advanced]\ncompositor = \"sway\"").is_err());
+        assert!(Config::parse("[advanced]\ncompositor = \"hyprland\"").is_err());
     }
 
     #[test]

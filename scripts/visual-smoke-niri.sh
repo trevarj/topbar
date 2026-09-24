@@ -125,7 +125,6 @@ set -eu
 
 # A nested non-session launch does not replace inherited desktop markers.
 export XDG_CURRENT_DESKTOP=niri
-unset HYPRLAND_INSTANCE_SIGNATURE
 
 artifact_dir="${1:-target/visual-smoke}"
 config="${TOPBAR_VISUAL_CONFIG:-config.toml}"

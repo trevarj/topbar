@@ -390,7 +390,7 @@ mod tests {
         let previous = Config::default();
         let mut candidate = previous.clone();
         candidate.theme.mode = "light".into();
-        candidate.advanced.compositor = "hyprland".into();
+        candidate.advanced.compositor = "niri".into();
         assert!(check_startup_settings(&previous, &candidate).is_err());
         candidate.advanced.compositor = previous.advanced.compositor.clone();
         assert!(check_startup_settings(&previous, &candidate).is_ok());

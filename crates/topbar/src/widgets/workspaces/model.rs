@@ -294,7 +294,7 @@ mod tests {
 
     fn view(id: u64, idx: usize, occupied: bool) -> WorkspaceView {
         WorkspaceView {
-            id: WorkspaceId::Niri(id),
+            id,
             idx,
             name: None,
             is_active: false,
@@ -335,7 +335,7 @@ mod tests {
         let slots = visible_slots(&snapshot, options("eDP-1"));
         assert_eq!(
             slots.iter().map(|slot| slot.id).collect::<Vec<_>>(),
-            vec![WorkspaceId::Niri(1), WorkspaceId::Niri(2)],
+            vec![1, 2],
             "the empty active workspace stays, the empty inactive one goes"
         );
     }
@@ -358,19 +358,17 @@ mod tests {
         let slots = visible_slots(&snapshot(&[("eDP-1", views)]), options("eDP-1"));
         assert_eq!(
             slots.iter().map(|slot| slot.id).collect::<Vec<_>>(),
-            vec![WorkspaceId::Niri(1), WorkspaceId::Niri(2)],
+            vec![1, 2],
             "the empty named workspace stays; the empty nameless one goes"
         );
     }
 
     #[test]
-    fn persistent_numbered_and_named_native_workspaces_keep_identity_and_focus() {
+    fn persistent_numbered_and_named_workspaces_keep_identity_and_focus() {
         let mut numbered = view(3, 300, false);
-        numbered.id = WorkspaceId::Hyprland(3);
         numbered.is_persistent = true;
         numbered.is_active = true;
         let mut named = view(4, 301, false);
-        named.id = WorkspaceId::Hyprland(-9);
         named.name = Some("notes".into());
         let mut options = options("DP-1");
         options.label_type = LabelType::Index;
@@ -380,7 +378,7 @@ mod tests {
             slots[0].is_active && !slots[0].is_focused,
             "an active workspace on another monitor must accept a click"
         );
-        assert_eq!(slots[1].id, WorkspaceId::Hyprland(-9));
+        assert_eq!(slots[1].id, 4);
     }
 
     #[test]
@@ -403,10 +401,7 @@ mod tests {
         ]);
 
         let mine = visible_slots(&snapshot, options("eDP-1"));
-        assert_eq!(
-            mine.iter().map(|slot| slot.id).collect::<Vec<_>>(),
-            vec![WorkspaceId::Niri(1)]
-        );
+        assert_eq!(mine.iter().map(|slot| slot.id).collect::<Vec<_>>(), vec![1]);
 
         let mut all = options("eDP-1");
         all.filter_by_output = false;
@@ -415,11 +410,7 @@ mod tests {
                 .iter()
                 .map(|slot| slot.id)
                 .collect::<Vec<_>>(),
-            vec![
-                WorkspaceId::Niri(11),
-                WorkspaceId::Niri(12),
-                WorkspaceId::Niri(1)
-            ],
+            vec![11, 12, 1],
             "connector order, then index order"
         );
     }
@@ -448,11 +439,7 @@ mod tests {
             .filter(|slot| slot.is_active)
             .map(|slot| slot.id)
             .collect();
-        assert_eq!(
-            active,
-            vec![WorkspaceId::Niri(11)],
-            "exactly one pill across all outputs"
-        );
+        assert_eq!(active, vec![11], "exactly one pill across all outputs");
     }
 
     #[test]
@@ -584,18 +571,11 @@ mod tests {
     fn the_first_paint_is_not_an_appearance() {
         // Nothing was shown before: this is the widget arriving, and it has to
         // be drawn at once rather than faded in.
-        assert!(!is_appearance(&[], WorkspaceId::Niri(1)));
-        assert!(!is_appearance(&[], WorkspaceId::Hyprland(-7)));
+        assert!(!is_appearance(&[], 1));
 
         // Once something is on screen, a workspace that was not there is.
-        assert!(is_appearance(
-            &[WorkspaceId::Niri(1), WorkspaceId::Niri(2)],
-            WorkspaceId::Hyprland(1)
-        ));
-        assert!(!is_appearance(
-            &[WorkspaceId::Niri(1), WorkspaceId::Niri(2)],
-            WorkspaceId::Niri(2)
-        ));
+        assert!(is_appearance(&[1, 2], 3));
+        assert!(!is_appearance(&[1, 2], 2));
     }
 
     #[test]

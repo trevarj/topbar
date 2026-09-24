@@ -13,15 +13,9 @@ pub enum SvcError {
     #[error("NIRI_SOCKET is not set; the panel is not running under niri")]
     NoNiriSocket,
 
-    /// Desktop markers and endpoint environment cannot select one backend.
+    /// Niri cannot be selected for the current session or configuration.
     #[error("compositor selection failed: {0}")]
     CompositorSelection(String),
-
-    /// The selected Hyprland session did not export its endpoint.
-    #[error(
-        "Hyprland needs XDG_RUNTIME_DIR and HYPRLAND_INSTANCE_SIGNATURE; restart topbar in the selected session"
-    )]
-    NoHyprlandSocket,
 
     /// The socket could not be reached, or the connection broke mid-request.
     #[error("compositor socket I/O failed: {0}")]
@@ -157,9 +151,7 @@ impl SvcError {
     /// accompanies the toast, not in the toast.
     pub fn user_message(&self) -> &'static str {
         match self {
-            Self::NoNiriSocket | Self::NoHyprlandSocket | Self::Io(_) | Self::Timeout(_) => {
-                "Could not reach the compositor"
-            }
+            Self::NoNiriSocket | Self::Io(_) | Self::Timeout(_) => "Could not reach the compositor",
             Self::CompositorSelection(_) => "Could not select the compositor",
             Self::Rejected(_) => "The compositor refused the request",
             Self::Protocol(_) => "The compositor sent an unexpected reply",

@@ -35,8 +35,8 @@ only; the project is not affiliated with the GNOME Project.
   while a source is in use.
 - **Continuous.** One solid, full-width, opaque panel pinned to the top edge.
   No islands, no floating pills, no per-widget outlines, no bottom position.
-- **System-owned.** The panel presents system state, not decoration. There is
-  one dark palette, one accent color, and one generated stylesheet.
+- **System-owned.** The panel presents system state, not decoration. Dark and
+  light modes each resolve one palette and one generated stylesheet.
 - **Mass code reduction is the point.** v1 was 76k lines; v2 targets ~30k. A
   change that adds a subsystem needs to justify itself against that budget.
 - **Only the planned surface.** Do not add widgets, config keys, or options that
@@ -82,7 +82,7 @@ only; the project is not affiliated with the GNOME Project.
   from a `cfg(debug_assertions)` block is dead code in the packaged build and
   only the release lint says so. `nix flake check` compiles the tests in
   release, so it catches this; a green `cargo clippy` alone does not.
-- `nix develop -c ./scripts/smoke-*.sh` — nested niri + `grim` screenshots.
+- `nix develop -c ./scripts/visual-smoke-niri.sh` — nested niri + `grim` screenshots.
   Local only: niri has no headless backend, so CI cannot run them.
 - UI milestones also need a run on the live niri session against
   `~/.config/topbar/config.toml`.

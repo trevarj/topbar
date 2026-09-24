@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use niri_ipc::state::EventStreamState;
 
-use crate::compositor::{KeyboardLayoutSnapshot, WorkspaceId, WorkspaceView, WorkspacesSnapshot};
+use crate::compositor::{KeyboardLayoutSnapshot, WorkspaceView, WorkspacesSnapshot};
 
 /// Project the workspace half of `state`.
 ///
@@ -45,7 +45,7 @@ pub(crate) fn workspaces(state: &EventStreamState, connected: bool) -> Workspace
             focused_output = Some(output.clone());
         }
         outputs.entry(output).or_default().push(WorkspaceView {
-            id: WorkspaceId::Niri(workspace.id),
+            id: workspace.id,
             idx: usize::from(workspace.idx),
             name: workspace.name.clone(),
             is_active: workspace.is_active,

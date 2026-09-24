@@ -84,8 +84,8 @@ Keys whose feature was removed in the rewrite are accepted and produce a
   per-widget `outline_color`. Surfaces now use a fixed 1px hairline border and
   panel buttons are transparent until hovered.
 - **Theming that is no longer variable.** `theme.scheme`, `theme.wallpaper`,
-  `theme.popover`, `theme.shadows`. v2 ships a single dark palette; popover
-  shadows are always on.
+  `theme.popover`, `theme.shadows`. The native dark and light palettes can each
+  be overridden through `[theme.palette]`; popover shadows are always on.
 - **Per-widget visibility.** `disabled`, `show_if`, `show_if_interval`. A
   widget is shown by being placed in `left`, `center` or `right`, and widgets
   that have nothing to say hide themselves.
@@ -106,8 +106,8 @@ A dropped toggle set to the value v2 already behaves as is silently ignored:
 tell anyone. The inverted value warns. The same applies to `bar.outputs = []`,
 `theme.shadows = true` and `disabled = false`.
 
-Dropped *values* are handled the same way. `theme.mode` values `auto`, `light`
-and `gtk` warn and render as `"dark"`, and `theme.accent = "gtk"` warns and
+Dropped *values* are handled the same way. `theme.mode` values `auto` and
+`gtk` warn and render as `"dark"`; `"light"` is supported. `theme.accent = "gtk"` warns and
 falls back to the default accent. The one v1 value that is a hard error instead
 is `bar.position = "bottom"`, because there is no honest way to draw it.
 
@@ -476,11 +476,14 @@ that the thing it reports has just changed.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `mode` | string | `"dark"` | Accepted for compatibility; `"dark"` is the only value honoured. |
+| `mode` | string | `"dark"` | `"dark"` or `"light"`; selects the panel palette and GTK polarity. |
 | `accent` | string | `"#3584e4"` | A hex colour, or `"none"` for monochrome. |
 | `animations` | bool | `true` | Master switch for transitions and animations. |
 | `ripple` | bool | `true` | Material-style ripple on press. |
 | `blur` | bool | `false` | Ask the compositor to blur behind panel surfaces. |
+
+`[theme.palette]` overrides the selected mode's `background`, `surface` and
+`foreground` roles with hex colours; omitted roles retain their mode defaults.
 
 `blur` is a request, not a setting. The panel hands the compositor the exact
 region of each surface it would like blurred through `ext-background-effect-v1`;
