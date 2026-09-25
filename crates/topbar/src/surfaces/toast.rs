@@ -113,12 +113,13 @@ impl ToastSurface {
         config: &Config,
         services: &Services,
     ) -> Rc<Self> {
-        let window = build_window(monitor, top_margin(config));
+        let window = build_window(monitor, top_margin(config) - SHADOW_MARGIN);
 
         let stack = gtk4::Box::new(Orientation::Vertical, GAP);
         stack.add_css_class(classes::TOAST_STACK);
         stack.set_size_request(WIDTH, -1);
         stack.set_valign(Align::Start);
+        stack.set_margin_top(SHADOW_MARGIN);
         stack.set_margin_start(SHADOW_MARGIN);
         stack.set_margin_end(SHADOW_MARGIN);
         stack.set_margin_bottom(SHADOW_MARGIN);
@@ -237,11 +238,13 @@ impl ToastSurface {
         // construction is not always the state it reads — a banner that lands
         // behind the bar and rights itself a configure later reads as a
         // glitch, so it is stated on both sides of the map.
-        self.window.set_margin(Edge::Top, self.top_margin);
+        self.window
+            .set_margin(Edge::Top, self.top_margin - SHADOW_MARGIN);
         if !self.window.is_visible() {
             self.window.present();
         }
-        self.window.set_margin(Edge::Top, self.top_margin);
+        self.window
+            .set_margin(Edge::Top, self.top_margin - SHADOW_MARGIN);
     }
 
     /// Start the leaving animation for every banner that is no longer wanted.
@@ -595,12 +598,18 @@ impl Card {
             Easing::EaseInCubic
         };
 
+        if target < 1.0 {
+            slide.set_overflow(gtk4::Overflow::Hidden);
+        }
         self.animation.start(
             AnimationParams::new(duration).with_easing(easing),
             Box::new(move |progress| {
                 let reveal = start + (target - start) * progress;
                 slide.set_reveal(reveal);
                 card.set_opacity(reveal);
+                if reveal >= 1.0 {
+                    slide.set_overflow(gtk4::Overflow::Visible);
+                }
             }),
             Some(Box::new(done)),
         );

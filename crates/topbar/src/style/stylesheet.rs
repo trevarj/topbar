@@ -453,6 +453,15 @@ window.click-catcher-window,
     background: transparent;
 }
 
+/* GTK's window shadow follows the rectangular layer surface, not the
+   rounded popup inside it. Leave only each popup's own CSS shadow. */
+window.popover-window,
+window.location-window,
+window.toast-window,
+window.osd-window {
+    box-shadow: none;
+}
+
 /* The catcher has to PAINT, and this is the whole reason it works.
 
    It draws nothing anyone can see, but a widget that draws literally nothing

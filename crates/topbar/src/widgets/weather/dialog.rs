@@ -156,6 +156,12 @@ impl Dialog {
         let root = gtk4::Box::new(Orientation::Vertical, 10);
         root.add_css_class(classes::LOCATION_DIALOG);
         root.set_size_request(WIDTH, -1);
+        // The CSS shadow belongs to the dialog, not its rectangular window.
+        // Reserve enough space for its 24px blur on every side.
+        root.set_margin_start(32);
+        root.set_margin_end(32);
+        root.set_margin_top(32);
+        root.set_margin_bottom(32);
 
         let title = Label::new(Some("Weather location"));
         title.add_css_class(classes::LOCATION_TITLE);
