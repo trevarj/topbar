@@ -114,15 +114,17 @@ is `bar.position = "bottom"`, because there is no honest way to draw it.
 ## What the panel never writes
 
 topbar never edits `config.toml`. Choices made at runtime go to
-`$XDG_STATE_HOME/topbar/state.json` instead: the weather location picked in the
-setup dialog, the crypto entries chosen in the settings view, the notification
-history, and the Do Not Disturb flag.
+`$XDG_STATE_HOME/topbar/state.json` instead: the weather location and temperature
+unit picked in the setup dialog, the crypto entries chosen in the settings view,
+the notification history, and the Do Not Disturb flag.
 
-That file is the reason two config keys behave as seeds rather than as
+That file is the reason three config choices behave as seeds rather than as
 settings. `widgets.weather.latitude`/`.longitude` are used only when the dialog
 has not saved a location; a location chosen in the UI wins from then on.
-`widgets.crypto.entries` is used only when the settings view has not saved a
-list. Deleting `state.json` returns both to what the config file says.
+`widgets.weather.unit` is used until the dialog saves a different unit; that
+choice wins on subsequent config reloads. `widgets.crypto.entries` is used only
+when the settings view has not saved a list. Deleting `state.json` returns these
+choices to what the config file says.
 
 ---
 
@@ -256,7 +258,7 @@ opens nothing, so it never draws the dot at all.
 |---|---|---|---|
 | `latitude` | float | unset | Latitude, `-90`–`90`. |
 | `longitude` | float | unset | Longitude, `-180`–`180`. |
-| `unit` | string | `"celsius"` | `"celsius"`/`"c"` or `"fahrenheit"`/`"f"`. |
+| `unit` | string | `"celsius"` | `"celsius"`/`"c"` or `"fahrenheit"`/`"f"`; a choice saved in the weather popup wins. |
 | `interval` | integer | `1800` | Seconds between refreshes. Minimum 60. |
 | `tooltip` | string | `"Weather"` | Static tooltip prefix. |
 | `max_chars` | integer | unset | Ellipsize the panel label past this many characters. |

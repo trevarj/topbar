@@ -18,7 +18,8 @@ use crate::refresh::Refresh;
 use crate::state_store::StateStore;
 use crate::weather::api::{self, Endpoints};
 use crate::weather::model::{
-    GeocodeResult, LocationView, Phase, WeatherData, WeatherState, phase_after_failure,
+    GeocodeResult, LocationView, Phase, TemperatureUnit, WeatherData, WeatherState,
+    phase_after_failure,
 };
 use crate::weather::{PersistedLocation, Settings};
 
@@ -33,6 +34,8 @@ pub(crate) enum Command {
     ),
     /// Read the weather here from now on.
     SetLocation(LocationView, oneshot::Sender<Result<(), SvcError>>),
+    /// Save a popup temperature choice.
+    SetUnit(TemperatureUnit, oneshot::Sender<Result<(), SvcError>>),
     /// The configuration changed under us.
     Configure(Settings),
 }
@@ -43,6 +46,7 @@ pub(crate) async fn run(
     mut commands: mpsc::Receiver<Command>,
     publisher: watch::Sender<Arc<WeatherState>>,
     settings: Settings,
+    unit_override: Option<TemperatureUnit>,
     endpoints: Endpoints,
     store: Option<StateStore>,
     mut connectivity: watch::Receiver<Arc<ConnectivityState>>,
@@ -53,7 +57,11 @@ pub(crate) async fn run(
 
     let mut task = Task {
         refresh: Refresh::new(settings.interval),
-        settings,
+        settings: Settings {
+            unit: unit_override.unwrap_or(settings.unit),
+            ..settings
+        },
+        unit_override,
         endpoints,
         publisher,
         store,
@@ -63,6 +71,7 @@ pub(crate) async fn run(
         due: None,
         online,
         in_flight: false,
+        generation: 0,
         deferred: false,
     };
 
@@ -95,7 +104,7 @@ pub(crate) async fn run(
             },
             outcome = outcomes.recv() => {
                 if let Some(outcome) = outcome {
-                    task.settle(outcome);
+                    task.settle(outcome.0, outcome.1);
                 }
             },
             () = &mut timer => task.fetch(),
@@ -108,11 +117,12 @@ pub(crate) async fn run(
 /// Everything the loop owns.
 struct Task {
     settings: Settings,
+    unit_override: Option<TemperatureUnit>,
     endpoints: Endpoints,
     publisher: watch::Sender<Arc<WeatherState>>,
     store: Option<StateStore>,
     /// Where a spawned fetch sends what it found.
-    answers: mpsc::Sender<Result<WeatherData, SvcError>>,
+    answers: mpsc::Sender<(u64, Result<WeatherData, SvcError>)>,
     location: Option<LocationView>,
     /// The last reading that arrived, and when. What stale-while-revalidate
     /// keeps showing.
@@ -122,8 +132,10 @@ struct Task {
     /// When the next fetch is due. `None` while nothing is scheduled.
     due: Option<Instant>,
     online: bool,
-    /// A request is out. Two in flight would race each other into the cache.
+    /// The current request is out. Changes can supersede it without waiting.
     in_flight: bool,
+    /// Invalidates replies from requests for an old location or unit.
+    generation: u64,
     /// A fetch came due while the machine was offline and is owed.
     deferred: bool,
 }
@@ -144,6 +156,7 @@ impl Task {
         let state = WeatherState {
             phase,
             location: self.location.clone(),
+            unit: self.settings.unit,
         };
         if **self.publisher.borrow() == state {
             return;
@@ -184,18 +197,22 @@ impl Task {
             self.settings.days,
         );
         let unit = self.settings.unit;
+        let generation = self.generation;
         let answers = self.answers.clone();
         tokio::spawn(async move {
             let outcome = match api::fetch(url).await {
                 Ok(body) => api::parse_forecast(&body, unit),
                 Err(error) => Err(error),
             };
-            let _ = answers.send(outcome).await;
+            let _ = answers.send((generation, outcome)).await;
         });
     }
 
     /// A request came back.
-    fn settle(&mut self, outcome: Result<WeatherData, SvcError>) {
+    fn settle(&mut self, generation: u64, outcome: Result<WeatherData, SvcError>) {
+        if generation != self.generation {
+            return;
+        }
         self.in_flight = false;
         match outcome {
             Ok(data) => {
@@ -244,6 +261,10 @@ impl Task {
                 self.set_location(location);
                 let _ = reply.send(Ok(()));
             }
+            Command::SetUnit(unit, reply) => {
+                self.set_unit(unit);
+                let _ = reply.send(Ok(()));
+            }
             Command::Configure(settings) => self.configure(settings),
         }
     }
@@ -285,27 +306,43 @@ impl Task {
         }
 
         self.location = Some(location);
-        // The reading on screen is for the old place. Keeping it would be
-        // worse than a moment of "Loading": it would be wrong and look right.
+        // The reading on screen is for the old place.
+        self.invalidate();
+    }
+
+    /// A popup choice wins on subsequent configuration reloads.
+    fn set_unit(&mut self, unit: TemperatureUnit) {
+        if self.unit_override != Some(unit) {
+            self.unit_override = Some(unit);
+            if let Some(store) = &self.store {
+                store.update(move |state| state.weather.unit = Some(unit));
+            }
+        }
+        if self.settings.unit == unit {
+            return;
+        }
+        self.settings.unit = unit;
+        self.invalidate();
+    }
+
+    /// Retire in-flight work before any superseded reading can be published.
+    fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.in_flight = false;
         self.last_good = None;
         self.refresh = Refresh::new(self.settings.interval);
-        self.publish(Phase::Loading);
+        self.publish_phase();
         self.fetch();
     }
 
     /// The configuration changed. M12's hot reload is what calls this.
-    fn configure(&mut self, settings: Settings) {
+    fn configure(&mut self, mut settings: Settings) {
+        settings.unit = self.unit_override.unwrap_or(settings.unit);
         if self.settings == settings {
             return;
         }
         debug!("weather settings changed; the cache is no longer valid");
         self.settings = settings;
-        // Temperatures in the wrong unit and a forecast of the wrong length
-        // are not worth keeping, so this is one of the two places the cache is
-        // thrown away rather than revalidated.
-        self.last_good = None;
-        self.refresh = Refresh::new(self.settings.interval);
-        self.publish(Phase::Loading);
-        self.fetch();
+        self.invalidate();
     }
 }

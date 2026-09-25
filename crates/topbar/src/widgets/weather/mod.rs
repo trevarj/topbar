@@ -186,18 +186,15 @@ impl Inner {
         );
 
         let mut tooltip = format!(
-            "{}\n{} · {}\nFeels like {}{}",
+            "{}\n{} · {}{}\nFeels like {}{}",
             state
                 .location
                 .as_ref()
                 .map_or("Weather", |location| location.label.as_str()),
             condition(data.current.code),
-            format_args!(
-                "{}{}",
-                degrees(data.current.temperature),
-                data.unit.symbol()
-            ),
-            degrees(data.current.feels_like),
+            data.current.temperature.round() as i64,
+            data.unit.symbol(),
+            data.current.feels_like.round() as i64,
             data.unit.symbol(),
         );
         // A stale reading looks exactly like a fresh one on a panel this
@@ -332,7 +329,7 @@ mod tests {
         // 2 is "Partly cloudy", the longest thing a mild day produces.
         assert_eq!(panel_label(21.4, 2, true), "21° Partly cloudy");
         assert_eq!(panel_label(21.4, 2, false), "21°");
-        // Still no unit symbol either way: the tooltip is where °C appears.
+        // Still no unit symbol either way: the tooltip shows °C or °F.
         assert_eq!(panel_label(-0.4, 0, false), "0°");
     }
 

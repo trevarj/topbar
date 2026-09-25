@@ -188,7 +188,7 @@ accept the keys but act only on the buttons they have free.
 | Key | Default | Meaning |
 |---|---|---|
 | `latitude`, `longitude` | unset | Seed coordinates. A location saved from the popover's search wins. |
-| `unit` | `"celsius"` | `"celsius"`/`"c"` or `"fahrenheit"`/`"f"`. |
+| `unit` | `"celsius"` | `"celsius"`/`"c"` or `"fahrenheit"`/`"f"`; a unit saved in the weather popup wins, including after reload. |
 | `interval` | `1800` | Seconds between refreshes. Minimum 60. |
 | `tooltip` | `"Weather"` | Static tooltip prefix. |
 | `max_chars` | unset | Ellipsize the panel label past this many characters. |

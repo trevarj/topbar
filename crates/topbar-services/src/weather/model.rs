@@ -7,8 +7,11 @@
 
 use std::time::SystemTime;
 
+use serde::{Deserialize, Serialize};
+
 /// Which scale temperatures are reported in.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum TemperatureUnit {
     /// `°C`.
     #[default]
@@ -165,6 +168,8 @@ pub struct WeatherState {
     pub phase: Phase,
     /// Where it is being read for, once there is a location at all.
     pub location: Option<LocationView>,
+    /// The unit chosen for the next reading, including while it loads.
+    pub unit: TemperatureUnit,
 }
 
 impl WeatherState {
@@ -282,6 +287,7 @@ mod tests {
         let state = WeatherState {
             phase,
             location: None,
+            unit: TemperatureUnit::Celsius,
         };
         assert_eq!(state.data(), Some(&sample()));
         assert_eq!(state.stale_since(), Some(at));
@@ -295,6 +301,7 @@ mod tests {
         let state = WeatherState {
             phase: Phase::Unavailable,
             location: None,
+            unit: TemperatureUnit::Celsius,
         };
         assert_eq!(state.data(), None);
         assert_eq!(state.stale_since(), None);
@@ -306,6 +313,7 @@ mod tests {
         let state = WeatherState {
             phase: Phase::Ready(sample()),
             location: None,
+            unit: TemperatureUnit::Celsius,
         };
         assert_eq!(state.data(), Some(&sample()));
         assert_eq!(state.stale_since(), None);

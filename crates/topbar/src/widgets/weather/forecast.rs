@@ -97,7 +97,7 @@ impl Forecast {
         titles.append(&location);
 
         let configure = icon_button(CONFIGURE_ICON, classes::FORECAST_CONFIGURE);
-        configure.set_tooltip_text(Some("Change the weather location"));
+        configure.set_tooltip_text(Some("Change weather location and temperature unit"));
         configure.set_valign(Align::Start);
         configure.connect_clicked({
             let services = services.clone();
@@ -270,13 +270,21 @@ impl Forecast {
 
         let unit_icon = icon(data.current.code, data.current.is_day);
         set_icon(&self.current_icon, unit_icon);
-        set_text(&self.current_temp, &degrees(data.current.temperature));
+        set_text(
+            &self.current_temp,
+            &format!(
+                "{}{}",
+                data.current.temperature.round() as i64,
+                data.unit.symbol()
+            ),
+        );
         set_text(
             &self.current_condition,
             &format!(
-                "{}\nFeels like {}",
+                "{}\nFeels like {}{}",
                 condition(data.current.code),
-                degrees(data.current.feels_like)
+                data.current.feels_like.round() as i64,
+                data.unit.symbol()
             ),
         );
 
@@ -416,9 +424,8 @@ impl Row {
 
 /// A temperature, rounded, with its degree sign.
 ///
-/// The unit symbol is deliberately absent: the card says nothing about which
-/// scale it is in because the user chose it and every number on screen is in
-/// it. The tooltip is where `°C` appears.
+/// Forecast rows and the narrow bar omit the scale because the current
+/// reading identifies it; the full symbol is drawn without another `°`.
 pub fn degrees(value: f64) -> String {
     format!("{}°", value.round() as i64)
 }

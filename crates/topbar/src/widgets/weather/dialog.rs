@@ -1,4 +1,4 @@
-//! The location dialog: a modal on a layer surface of its own.
+//! The weather settings dialog: a modal on a layer surface of its own.
 //!
 //! ```text
 //! window .location-window          layer Overlay, no anchors, so centred
@@ -29,10 +29,12 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gtk4::prelude::*;
-use gtk4::{Align, Button, Entry, Expander, Label, Orientation, Window, gdk, glib, pango};
+use gtk4::{
+    Align, Button, DropDown, Entry, Expander, Label, Orientation, Window, gdk, glib, pango,
+};
 use gtk4_layer_shell::{KeyboardMode, Layer, LayerShell};
 use topbar_core::config::WeatherConfig;
-use topbar_services::weather::valid_coordinates;
+use topbar_services::weather::{TemperatureUnit, valid_coordinates};
 use topbar_services::{GeocodeResult, Runtime, Services};
 use tracing::{debug, warn};
 
@@ -133,6 +135,9 @@ struct Dialog {
     latitude: Entry,
     longitude: Entry,
     advanced: Expander,
+    unit: DropDown,
+    initial_unit: TemperatureUnit,
+    initial_coordinates: (String, String),
     /// The place the user picked, so Save can keep its name.
     selected: RefCell<Option<GeocodeResult>>,
     /// The pending debounce timer, cancelled by the next keystroke.
@@ -163,7 +168,7 @@ impl Dialog {
         root.set_margin_top(32);
         root.set_margin_bottom(32);
 
-        let title = Label::new(Some("Weather location"));
+        let title = Label::new(Some("Weather settings"));
         title.add_css_class(classes::LOCATION_TITLE);
         title.set_xalign(0.0);
 
@@ -192,6 +197,18 @@ impl Dialog {
         }
         coordinates.append(&latitude);
         coordinates.append(&longitude);
+        let initial_coordinates = (latitude.text().to_string(), longitude.text().to_string());
+
+        let unit = DropDown::from_strings(&["Celsius (°C)", "Fahrenheit (°F)"]);
+        let state = services.weather.state();
+        let initial_unit = state.borrow().unit;
+        unit.set_selected(u32::from(initial_unit == TemperatureUnit::Fahrenheit));
+        let unit_row = gtk4::Box::new(Orientation::Horizontal, 8);
+        let unit_label = Label::new(Some("Temperature unit"));
+        unit_label.set_xalign(0.0);
+        unit_label.set_hexpand(true);
+        unit_row.append(&unit_label);
+        unit_row.append(&unit);
 
         let advanced = Expander::new(Some("Advanced"));
         advanced.add_css_class(classes::LOCATION_ADVANCED);
@@ -214,6 +231,7 @@ impl Dialog {
         root.append(&search);
         root.append(&results);
         root.append(&status);
+        root.append(&unit_row);
         root.append(&advanced);
         root.append(&actions);
         window.set_child(Some(&root));
@@ -227,6 +245,9 @@ impl Dialog {
             latitude,
             longitude,
             advanced,
+            unit,
+            initial_unit,
+            initial_coordinates,
             selected: RefCell::new(None),
             timer: RefCell::new(None),
             generation: Cell::new(0),
@@ -441,8 +462,27 @@ impl Dialog {
 
     /// Commit whatever the entries say.
     fn save(self: &Rc<Self>) {
+        let unit = if self.unit.selected() == 1 {
+            TemperatureUnit::Fahrenheit
+        } else {
+            TemperatureUnit::Celsius
+        };
+        let unit_changed = unit != self.initial_unit;
         let latitude = self.latitude.text().trim().to_string();
         let longitude = self.longitude.text().trim().to_string();
+
+        // The unit can be saved before any location is configured, without
+        // rewriting a saved location with the config's seed coordinates.
+        if unit_changed
+            && self.selected.borrow().is_none()
+            && latitude == self.initial_coordinates.0
+            && longitude == self.initial_coordinates.1
+        {
+            let handle = self.services.weather.handle().clone();
+            bridge::act(SCOPE, async move { handle.set_unit(unit).await });
+            dismiss();
+            return;
+        }
 
         if latitude.is_empty() && longitude.is_empty() {
             self.set_status(EMPTY_QUERY);
@@ -479,6 +519,9 @@ impl Dialog {
 
         let handle = self.services.weather.handle().clone();
         bridge::act(SCOPE, async move {
+            if unit_changed {
+                handle.set_unit(unit).await?;
+            }
             handle.set_manual(latitude, longitude, label).await
         });
         dismiss();

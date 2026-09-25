@@ -26,6 +26,7 @@ use crate::state_store::StateStore;
 use crate::weather::api::Endpoints;
 
 const FORECAST: &str = include_str!("../../tests/fixtures/open-meteo-forecast-celsius.json");
+const FAHRENHEIT: &str = include_str!("../../tests/fixtures/open-meteo-forecast-fahrenheit.json");
 const GEOCODING: &str = include_str!("../../tests/fixtures/open-meteo-geocoding.json");
 const RATE_LIMIT: &str = include_str!("../../tests/fixtures/open-meteo-rate-limit.json");
 
@@ -381,18 +382,36 @@ async fn saving_a_location_writes_it_down_and_fetches_for_it() {
             .map(|location| location.label.as_str()),
         Some("Moscow — Moscow, Russia")
     );
+    api.answer_with(200, FAHRENHEIT);
+    weather
+        .handle()
+        .set_unit(TemperatureUnit::Fahrenheit)
+        .await
+        .expect("the popup choice is accepted");
+    let fahrenheit = wait_for(&mut state, "a Fahrenheit reading", |state| {
+        state.unit == TemperatureUnit::Fahrenheit
+            && state.data().is_some_and(|data| data.unit == state.unit)
+    })
+    .await;
+    assert_eq!(
+        fahrenheit.data().expect("a reading").current.temperature,
+        70.5
+    );
 
     // And a panel started tomorrow skips the setup dialog entirely.
-    wait_until("the location to reach the state file", || {
-        std::fs::read_to_string(&path)
-            .is_ok_and(|contents| contents.contains("Moscow — Moscow, Russia"))
+    wait_until("the choices to reach the state file", || {
+        std::fs::read_to_string(&path).is_ok_and(|contents| {
+            contents.contains("Moscow — Moscow, Russia")
+                && contents.contains("\"unit\": \"fahrenheit\"")
+        })
     })
     .await;
 
-    let (reloaded, _store) = StateStore::open_at(path.clone());
+    let (reloaded, store) = StateStore::open_at(path.clone());
     let saved = reloaded.weather.location.expect("a saved location");
     assert_eq!(saved.label, "Moscow — Moscow, Russia");
     assert!((saved.latitude - 55.75222).abs() < 1e-9);
+    assert_eq!(reloaded.weather.unit, Some(TemperatureUnit::Fahrenheit));
 
     let startup = startup_location(Some(saved), &WeatherConfig::default(), || {
         panic!("nothing to import")
@@ -402,4 +421,151 @@ async fn saving_a_location_writes_it_down_and_fetches_for_it() {
         "the second start has a location"
     );
     assert!(!startup.persist);
+
+    // The saved popup choice takes precedence over a Celsius config at startup
+    // and on a later reload; there is no Celsius data under a Fahrenheit label.
+    let config = WeatherConfig::default();
+    let (_, connectivity) = manual_connectivity(true);
+    let restarted = Weather::spawn(
+        Settings::from_config(&config),
+        reloaded.weather.unit,
+        api.endpoints.clone(),
+        Some(store),
+        connectivity,
+        startup.location,
+        true,
+    );
+    assert_eq!(restarted.state().borrow().unit, TemperatureUnit::Fahrenheit);
+    let mut state = restarted.state();
+    wait_for(&mut state, "the restarted Fahrenheit reading", |state| {
+        state
+            .data()
+            .is_some_and(|data| data.unit == TemperatureUnit::Fahrenheit)
+    })
+    .await;
+    let requests = api.requests();
+    let mut changed = Settings::from_config(&config);
+    changed.days = 4;
+    restarted
+        .handle()
+        .configure(changed)
+        .await
+        .expect("config reload is accepted");
+    wait_until("a reload request in the saved unit", || {
+        api.requests() > requests
+    })
+    .await;
+    let reading = wait_for(&mut state, "a post-reload Fahrenheit reading", |state| {
+        state.unit == TemperatureUnit::Fahrenheit
+            && state.data().is_some_and(|data| data.unit == state.unit)
+    })
+    .await;
+    assert_eq!(reading.unit, TemperatureUnit::Fahrenheit);
+}
+
+#[tokio::test]
+async fn choosing_a_unit_before_a_location_keeps_setup_available() {
+    let api = StubApi::start(200, FAHRENHEIT).await;
+    let (_online, connectivity) = manual_connectivity(true);
+    let weather = Weather::start_with(settings(), api.endpoints.clone(), None, connectivity, None);
+    let mut state = weather.state();
+    weather
+        .handle()
+        .set_unit(TemperatureUnit::Fahrenheit)
+        .await
+        .expect("the popup can save a unit without coordinates");
+    let chosen = wait_for(
+        &mut state,
+        "a Fahrenheit choice without a location",
+        |state| state.unit == TemperatureUnit::Fahrenheit,
+    )
+    .await;
+    assert_eq!(chosen.phase, Phase::NeedsLocation);
+    assert_eq!(api.requests(), 0, "no place means no forecast request");
+}
+
+#[tokio::test]
+async fn a_superseded_celsius_request_cannot_replace_fahrenheit_weather() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback is available");
+    let address = listener.local_addr().expect("a bound port");
+    let (old_requested, requested) = tokio::sync::oneshot::channel();
+    let (release_old, released) = tokio::sync::oneshot::channel();
+    let (old_sent, sent) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let (mut old, _) = listener.accept().await.expect("first request");
+        let mut scratch = [0_u8; 2048];
+        let length = old.read(&mut scratch).await.expect("old request");
+        assert!(String::from_utf8_lossy(&scratch[..length]).contains("temperature_unit=celsius"));
+        old_requested.send(()).ok();
+
+        let (mut new, _) = listener.accept().await.expect("replacement request");
+        let length = new.read(&mut scratch).await.expect("new request");
+        assert!(
+            String::from_utf8_lossy(&scratch[..length]).contains("temperature_unit=fahrenheit")
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{FAHRENHEIT}",
+            FAHRENHEIT.len()
+        );
+        new.write_all(response.as_bytes())
+            .await
+            .expect("new response");
+        let _ = released.await;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{FORECAST}",
+            FORECAST.len()
+        );
+        old.write_all(response.as_bytes())
+            .await
+            .expect("old response");
+        old_sent.send(()).ok();
+    });
+
+    let (_online, connectivity) = manual_connectivity(true);
+    let weather = Weather::start_with(
+        settings(),
+        Endpoints {
+            forecast: format!("http://{address}/forecast"),
+            geocoding: format!("http://{address}/search"),
+        },
+        None,
+        connectivity,
+        Some(moscow()),
+    );
+    let mut state = weather.state();
+    tokio::time::timeout(PATIENCE, requested)
+        .await
+        .expect("the initial request started")
+        .expect("the server answered");
+    weather
+        .handle()
+        .set_unit(TemperatureUnit::Fahrenheit)
+        .await
+        .expect("the new unit is accepted");
+    let loading = wait_for(&mut state, "the new unit before its reading", |state| {
+        state.unit == TemperatureUnit::Fahrenheit && state.phase == Phase::Loading
+    })
+    .await;
+    assert!(loading.data().is_none());
+    let ready = wait_for(&mut state, "Fahrenheit weather", |state| {
+        state
+            .data()
+            .is_some_and(|data| data.unit == TemperatureUnit::Fahrenheit)
+    })
+    .await;
+    let data = ready.data().expect("the Fahrenheit response");
+    assert_eq!(data.current.temperature, 70.5);
+    assert_eq!(data.current.feels_like, 73.2);
+    assert_eq!(data.days[0].high, 82.4);
+    assert_eq!(data.days[0].low, 64.9);
+
+    release_old.send(()).expect("the old request still exists");
+    tokio::time::timeout(PATIENCE, sent)
+        .await
+        .expect("the stale response arrived")
+        .expect("the server answered");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(state.borrow().data(), Some(data));
 }

@@ -61,16 +61,16 @@ const MIN_DAYS: u32 = 3;
 /// The widest.
 const MAX_DAYS: u32 = 5;
 
-/// The weather location, as `state.json` keeps it.
+/// The weather choices `state.json` keeps.
 ///
-/// The panel never writes coordinates back into the user's `config.toml`; a
-/// location chosen in the setup dialog is runtime state, and this is where it
-/// lives.
+/// The panel never writes popup choices back into the user's `config.toml`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PersistedWeather {
     /// Where the user last told the panel it is.
     pub location: Option<PersistedLocation>,
+    /// A popup choice takes precedence over the config's unit, even on reload.
+    pub unit: Option<TemperatureUnit>,
 }
 
 /// One saved location.
@@ -146,6 +146,7 @@ impl Weather {
 
         Self::spawn(
             Settings::from_config(config),
+            persisted.unit,
             Endpoints::from_env(),
             Some(store),
             connectivity.state(),
@@ -169,11 +170,20 @@ impl Weather {
         connectivity: watch::Receiver<Arc<crate::connectivity::ConnectivityState>>,
         location: Option<LocationView>,
     ) -> Self {
-        Self::spawn(settings, endpoints, store, connectivity, location, true)
+        Self::spawn(
+            settings,
+            None,
+            endpoints,
+            store,
+            connectivity,
+            location,
+            true,
+        )
     }
 
     fn spawn(
         settings: Settings,
+        unit_override: Option<TemperatureUnit>,
         endpoints: Endpoints,
         store: Option<StateStore>,
         connectivity: watch::Receiver<Arc<crate::connectivity::ConnectivityState>>,
@@ -181,13 +191,17 @@ impl Weather {
         wanted: bool,
     ) -> Self {
         let (commands, queue) = mpsc::channel(QUEUE);
-        let (publisher, state) = watch::channel(Arc::new(WeatherState::default()));
+        let (publisher, state) = watch::channel(Arc::new(WeatherState {
+            unit: unit_override.unwrap_or(settings.unit),
+            ..WeatherState::default()
+        }));
         let task = Deferred::spawn(
             wanted,
             task::run(
                 queue,
                 publisher,
                 settings,
+                unit_override,
                 endpoints,
                 store,
                 connectivity,
@@ -262,11 +276,19 @@ impl WeatherHandle {
 
     /// Apply a changed `[widgets.weather]` section.
     ///
-    /// A different unit or a different forecast length invalidates the cache:
-    /// the reading in hand is in the wrong scale or the wrong shape, so the
-    /// service throws it away and fetches again immediately.
+    /// A popup unit choice wins over this section; otherwise a different unit
+    /// invalidates the cache. A different forecast length does so as well.
     pub async fn configure(&self, settings: Settings) -> Result<(), SvcError> {
         self.send(Command::Configure(settings)).await
+    }
+
+    /// Save the temperature scale chosen in the popup.
+    pub async fn set_unit(&self, unit: TemperatureUnit) -> Result<(), SvcError> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Command::SetUnit(unit, reply)).await?;
+        answer
+            .await
+            .map_err(|_| SvcError::ServiceStopped("weather"))?
     }
 
     /// Save a location and refetch for it.
