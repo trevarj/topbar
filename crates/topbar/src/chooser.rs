@@ -4,7 +4,7 @@
 //! needs the user's palette and a layer surface, so it remains usable while
 //! the panel is stopped or being restarted.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{self, Read};
@@ -14,7 +14,9 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gtk4::prelude::*;
-use gtk4::{Align, Application, Button, Entry, Image, Label, Orientation, Window, gdk, gio, glib};
+use gtk4::{
+    Align, Application, Button, Entry, Image, Label, Orientation, Picture, Window, gdk, gio, glib,
+};
 use serde::Deserialize;
 use topbar_core::config::Config;
 use topbar_core::ipc::IpcRequest;
@@ -98,6 +100,18 @@ fn chooser_geometry(
         scroll_height,
         preview_height,
     }
+}
+
+/// Request the dialog's content width, while decoding enough detail for a
+/// wide wallpaper to be cropped instead of enlarging a shallow thumbnail.
+fn wallpaper_preview_dimensions(dialog_width: i32, available_height: i32) -> (i32, i32, i32) {
+    let width = dialog_width.saturating_sub(32).max(1);
+    let decode_height = width * 9 / 16;
+    (
+        width,
+        decode_height.min(available_height.max(1)),
+        decode_height,
+    )
 }
 
 /// The metadata that makes a decoded image reusable only while it still names
@@ -708,6 +722,18 @@ fn scroll_value_for_bounds(current: f64, page: f64, start: f64, end: f64) -> Opt
     }
 }
 
+fn prune_dead_thumbnail_refs<T: glib::prelude::ObjectType>(
+    entries: &mut HashMap<ThumbnailRequest, Vec<glib::WeakRef<T>>>,
+    request: &ThumbnailRequest,
+) {
+    if let Some(refs) = entries.get_mut(request) {
+        refs.retain(|widget| widget.upgrade().is_some());
+        if refs.is_empty() {
+            entries.remove(request);
+        }
+    }
+}
+
 /// Live chooser widgets and their small local state.
 struct Chooser {
     app: Application,
@@ -724,13 +750,18 @@ struct Chooser {
     selected: RefCell<Option<String>>,
     search: Entry,
     scroll: gtk4::ScrolledWindow,
+    scroll_motion: Animation,
+    scroll_target: Rc<Cell<Option<f64>>>,
+    scroll_retry_queued: Cell<bool>,
     results: gtk4::Box,
     preview: gtk4::Box,
+    preview_picture: RefCell<Option<(ThumbnailRequest, Picture, Image)>>,
     row_widgets: RefCell<Vec<(usize, Button)>>,
     thumbnail_width: i32,
     thumbnail_height: i32,
     preview_width: i32,
     preview_height: i32,
+    preview_decode_height: i32,
     thumbnail_scheduler: RefCell<ThumbnailScheduler>,
     thumbnail_cache: RefCell<ThumbnailCache>,
     thumbnail_images: RefCell<HashMap<ThumbnailRequest, Vec<glib::WeakRef<Image>>>>,
@@ -826,8 +857,15 @@ impl Chooser {
         scroll.set_min_content_height(geometry.scroll_height);
         scroll.set_max_content_height(geometry.scroll_height);
         scroll.set_child(Some(&results));
+        // Theme rows use GTK focus scrolling; other layouts retain selection scrolling.
+        scroll
+            .child()
+            .and_downcast::<gtk4::Viewport>()
+            .expect("GtkBox results are wrapped in a viewport")
+            .set_scroll_to_focus(layout == ChooseLayout::Themes);
         scroll.set_vexpand(true);
         root.append(&scroll);
+        let scroll_motion = Animation::new(&scroll);
 
         let preview = gtk4::Box::new(Orientation::Vertical, 6);
         preview.add_css_class(classes::CHOOSER_PREVIEW);
@@ -859,11 +897,8 @@ impl Chooser {
             .cloned()
             .or_else(|| candidates.first().map(|candidate| candidate.id.clone()));
         apply.set_sensitive(initial.is_some());
-        let preview_width = chooser_width.saturating_sub(32).max(1);
-        let preview_height = geometry
-            .preview_height
-            .map(|height| (preview_width * 9 / 16).min(height))
-            .unwrap_or(1);
+        let (preview_width, preview_height, preview_decode_height) =
+            wallpaper_preview_dimensions(chooser_width, geometry.preview_height.unwrap_or(1));
 
         let chooser = Rc::new(Self {
             app,
@@ -878,13 +913,18 @@ impl Chooser {
             selected: RefCell::new(initial),
             search,
             scroll,
+            scroll_motion,
+            scroll_target: Rc::new(Cell::new(None)),
+            scroll_retry_queued: Cell::new(false),
             results,
             preview,
+            preview_picture: RefCell::new(None),
             row_widgets: RefCell::new(Vec::new()),
             thumbnail_width,
             thumbnail_height,
             preview_width,
             preview_height,
+            preview_decode_height,
             thumbnail_scheduler: RefCell::new(ThumbnailScheduler::default()),
             thumbnail_cache: RefCell::new(ThumbnailCache::default()),
             thumbnail_images: RefCell::new(HashMap::new()),
@@ -899,6 +939,20 @@ impl Chooser {
     }
 
     fn wire(self: &Rc<Self>, cancel: &Button) {
+        let wheel = gtk4::EventControllerScroll::new(gtk4::EventControllerScrollFlags::VERTICAL);
+        wheel.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        wheel.connect_scroll({
+            let weak = Rc::downgrade(self);
+            move |_, _, _| {
+                if let Some(chooser) = weak.upgrade() {
+                    chooser.scroll_motion.cancel();
+                    chooser.scroll_target.set(None);
+                }
+                glib::Propagation::Proceed
+            }
+        });
+        self.scroll.add_controller(wheel);
+
         self.search.connect_changed({
             let weak = Rc::downgrade(self);
             move |_| {
@@ -934,6 +988,8 @@ impl Chooser {
         });
 
         let keys = gtk4::EventControllerKey::new();
+        // Capture navigation before the focused search entry handles it.
+        keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
         keys.connect_key_pressed({
             let weak = Rc::downgrade(self);
             move |_, key, _, _| {
@@ -1066,54 +1122,133 @@ impl Chooser {
             here.saturating_add(direction as usize)
                 .min(visible.len() - 1)
         };
-        self.select_index(visible[target]);
+        self.select_from_keyboard(visible[target]);
     }
 
     fn select_at(self: &Rc<Self>, index: usize) {
         let visible = self.query_indices();
         if let Some(&candidate) = visible.get(index.min(visible.len().saturating_sub(1))) {
-            self.select_index(candidate);
+            self.select_from_keyboard(candidate);
         }
     }
 
-    fn select_index(self: &Rc<Self>, index: usize) {
-        *self.selected.borrow_mut() = Some(self.candidates[index].id.clone());
-        self.update_apply_sensitivity();
-        self.render();
-        // `render` replaces every row. Let GTK allocate the replacement rows
-        // before comparing their content coordinates to the scroll offset.
-        // Reading the current selection inside the idle keeps a burst of key
-        // presses coalesced to the final row.
-        let chooser = Rc::downgrade(self);
-        glib::idle_add_local_once(move || {
-            if let Some(chooser) = chooser.upgrade() {
-                chooser.scroll_selected_into_view();
+    fn select_from_keyboard(self: &Rc<Self>, index: usize) {
+        if self.layout == ChooseLayout::Themes {
+            self.scroll_motion.cancel();
+            self.scroll_target.set(None);
+        }
+        if let Some((_, row)) = self
+            .row_widgets
+            .borrow()
+            .iter()
+            .find(|(candidate, _)| *candidate == index)
+        {
+            if self.layout == ChooseLayout::Themes && row.has_focus() {
+                // Repeated Home/End must bring back a row scrolled away by the wheel.
+                self.scroll
+                    .child()
+                    .and_downcast::<gtk4::Viewport>()
+                    .expect("GtkBox results are wrapped in a viewport")
+                    .scroll_to(row, None);
             }
-        });
+            row.grab_focus();
+        }
+        self.select_index(index);
     }
 
-    fn scroll_selected_into_view(&self) {
+    fn select_index(self: &Rc<Self>, index: usize) {
+        let previous = self.selected.borrow().clone();
+        if let Some(previous) = previous.as_deref() {
+            let rows = self.row_widgets.borrow();
+            if let Some((_, row)) = rows
+                .iter()
+                .find(|(candidate, _)| self.candidates[*candidate].id == previous)
+            {
+                row.remove_css_class(classes::CHOOSER_RESULT_SELECTED);
+            }
+        }
+        let id = self.candidates[index].id.clone();
+        if let Some((_, row)) = self
+            .row_widgets
+            .borrow()
+            .iter()
+            .find(|(candidate, _)| *candidate == index)
+        {
+            row.add_css_class(classes::CHOOSER_RESULT_SELECTED);
+        }
+        *self.selected.borrow_mut() = Some(id);
+        self.update_apply_sensitivity();
+        self.render_preview();
+        if let Some(request) = previous
+            .as_deref()
+            .and_then(|id| {
+                self.candidates
+                    .iter()
+                    .find(|candidate| candidate.id == id)
+                    .and_then(|candidate| candidate.preview.clone())
+            })
+            .map(|path| {
+                self.thumbnail_request(&path, self.preview_width, self.preview_decode_height)
+            })
+        {
+            prune_dead_thumbnail_refs(&mut self.thumbnail_images.borrow_mut(), &request);
+            prune_dead_thumbnail_refs(&mut self.thumbnail_errors.borrow_mut(), &request);
+        }
+        self.refresh_thumbnail_interests();
+        if self.layout != ChooseLayout::Themes
+            && !self.scroll_selected_into_view()
+            && !self.scroll_retry_queued.replace(true)
+        {
+            let chooser = Rc::downgrade(self);
+            glib::idle_add_local_once(move || {
+                if let Some(chooser) = chooser.upgrade() {
+                    chooser.scroll_retry_queued.set(false);
+                    chooser.scroll_selected_into_view();
+                }
+            });
+        }
+    }
+
+    /// Returns false only when the selected row has not yet been allocated.
+    fn scroll_selected_into_view(&self) -> bool {
         let selected = self.selected.borrow();
         let Some(selected) = selected.as_deref() else {
-            return;
+            return true;
         };
         let rows = self.row_widgets.borrow();
         let Some((_, row)) = rows
             .iter()
             .find(|(index, _)| self.candidates[*index].id.as_str() == selected)
         else {
-            return;
+            return true;
         };
         let Some(bounds) = row.compute_bounds(&self.results) else {
-            return;
+            return false;
         };
+        if bounds.height() <= 0.0 {
+            return false;
+        }
         let adjustment = self.scroll.vadjustment();
         let current = adjustment.value();
+        let page = adjustment.page_size();
         let start = f64::from(bounds.y());
         let end = start + f64::from(bounds.height());
-        if let Some(value) = scroll_value_for_bounds(current, adjustment.page_size(), start, end) {
-            adjustment.set_value(value);
-        }
+        let base = self.scroll_target.get().unwrap_or(current);
+        let Some(value) = scroll_value_for_bounds(base, page, start, end) else {
+            return true;
+        };
+        let target = value.clamp(
+            adjustment.lower(),
+            (adjustment.upper() - page).max(adjustment.lower()),
+        );
+        self.scroll_target.set(Some(target));
+        let on_done = Rc::clone(&self.scroll_target);
+        self.scroll_motion.start(
+            AnimationParams::new(180).with_easing(Easing::EaseOutCubic),
+            Box::new(move |progress| adjustment.set_value(current + (target - current) * progress)),
+            Some(Box::new(move || on_done.set(None))),
+        );
+        true
     }
 
     fn accept(self: &Rc<Self>) {
@@ -1142,6 +1277,8 @@ impl Chooser {
     }
 
     fn render(self: &Rc<Self>) {
+        self.scroll_motion.cancel();
+        self.scroll_target.set(None);
         self.thumbnail_images.borrow_mut().clear();
         self.thumbnail_errors.borrow_mut().clear();
         self.row_widgets.borrow_mut().clear();
@@ -1252,6 +1389,7 @@ impl Chooser {
     }
 
     fn render_preview(self: &Rc<Self>) {
+        self.preview_picture.borrow_mut().take();
         while let Some(child) = self.preview.first_child() {
             self.preview.remove(&child);
         }
@@ -1270,11 +1408,25 @@ impl Chooser {
         match self.layout {
             ChooseLayout::Wallpapers => {
                 let request = candidate.preview.as_deref().map(|path| {
-                    self.thumbnail_request(path, self.preview_width, self.preview_height)
+                    self.thumbnail_request(path, self.preview_width, self.preview_decode_height)
                 });
-                let image = self.thumbnail_image(request.as_ref());
-                image.add_css_class(classes::CHOOSER_PREVIEW_IMAGE);
-                self.preview.append(&image);
+                let picture = Picture::new();
+                picture.add_css_class(classes::CHOOSER_PREVIEW_IMAGE);
+                picture.set_content_fit(gtk4::ContentFit::Cover);
+                picture.set_size_request(self.preview_width, self.preview_height);
+                picture.set_halign(Align::Fill);
+                picture.set_hexpand(true);
+                let placeholder = Image::from_icon_name("image-loading-symbolic");
+                placeholder.set_pixel_size(64);
+                placeholder.set_halign(Align::Center);
+                placeholder.set_valign(Align::Center);
+                let frame = gtk4::Overlay::new();
+                frame.set_size_request(self.preview_width, self.preview_height);
+                frame.set_halign(Align::Fill);
+                frame.set_hexpand(true);
+                frame.set_child(Some(&picture));
+                frame.add_overlay(&placeholder);
+                self.preview.append(&frame);
                 let error = Label::new(None);
                 error.add_css_class(classes::CHOOSER_SUBTITLE);
                 error.set_xalign(0.0);
@@ -1286,7 +1438,11 @@ impl Chooser {
                         .entry(request.clone())
                         .or_default()
                         .push(error.downgrade());
-                    if let ThumbnailView::Failed(message) = self.thumbnail_view(request) {
+                    let view = self.thumbnail_view(request);
+                    Self::set_preview_view(&view, &picture, &placeholder);
+                    *self.preview_picture.borrow_mut() =
+                        Some((request.clone(), picture, placeholder));
+                    if let ThumbnailView::Failed(message) = view {
                         error.set_label(&format!("Preview unavailable: {message}"));
                         error.set_visible(true);
                     }
@@ -1322,7 +1478,8 @@ impl Chooser {
             return false;
         };
         candidate.preview.as_deref().is_some_and(|path| {
-            let request = self.thumbnail_request(path, self.preview_width, self.preview_height);
+            let request =
+                self.thumbnail_request(path, self.preview_width, self.preview_decode_height);
             preview_allows_apply(preview_status(&self.thumbnail_view(&request)))
         })
     }
@@ -1398,7 +1555,11 @@ impl Chooser {
                 .find(|candidate| candidate.id == id)
                 .and_then(|candidate| candidate.preview.as_deref())
         {
-            interests.push(self.thumbnail_request(path, self.preview_width, self.preview_height));
+            interests.push(self.thumbnail_request(
+                path,
+                self.preview_width,
+                self.preview_decode_height,
+            ));
         }
         interests.extend(self.viewport_thumbnail_requests());
         self.thumbnail_scheduler.borrow_mut().synchronize(interests);
@@ -1417,7 +1578,9 @@ impl Chooser {
                     .find(|candidate| candidate.id == id)
                     .and_then(|candidate| candidate.preview.as_deref())
             })
-            .map(|path| self.thumbnail_request(path, self.preview_width, self.preview_height))
+            .map(|path| {
+                self.thumbnail_request(path, self.preview_width, self.preview_decode_height)
+            })
             .and_then(
                 |request| match self.thumbnail_scheduler.borrow().state(&request) {
                     Some(ThumbnailRequestState::Ready(key)) => Some(key.clone()),
@@ -1618,6 +1781,11 @@ impl Chooser {
 
     fn update_thumbnail_widgets(&self, request: &ThumbnailRequest) {
         let view = self.thumbnail_view(request);
+        if let Some((current, picture, placeholder)) = self.preview_picture.borrow().as_ref()
+            && current == request
+        {
+            Self::set_preview_view(&view, picture, placeholder);
+        }
         if let Some(images) = self.thumbnail_images.borrow_mut().get_mut(request) {
             images.retain(|image| {
                 let Some(image) = image.upgrade() else {
@@ -1645,6 +1813,24 @@ impl Chooser {
                 }
                 true
             });
+        }
+    }
+
+    fn set_preview_view(view: &ThumbnailView, picture: &Picture, placeholder: &Image) {
+        match view {
+            ThumbnailView::Ready(texture) => {
+                picture.set_paintable(Some(texture));
+                placeholder.set_visible(false);
+            }
+            ThumbnailView::Loading | ThumbnailView::Failed(_) => {
+                picture.set_paintable(None::<&gdk::Texture>);
+                placeholder.set_icon_name(Some(if matches!(view, ThumbnailView::Loading) {
+                    "image-loading-symbolic"
+                } else {
+                    "image-missing-symbolic"
+                }));
+                placeholder.set_visible(true);
+            }
         }
     }
 }
@@ -1908,10 +2094,43 @@ mod tests {
     }
 
     #[test]
+    fn discarded_preview_refs_do_not_accumulate_or_remove_live_rows() {
+        let old = request(1);
+        let next = request(2);
+        let row: glib::Object = glib::Object::new();
+        let preview: glib::Object = glib::Object::new();
+        let next_preview: glib::Object = glib::Object::new();
+        let mut refs = HashMap::from([
+            (old.clone(), vec![row.downgrade(), preview.downgrade()]),
+            (next.clone(), vec![next_preview.downgrade()]),
+        ]);
+
+        drop(preview);
+        prune_dead_thumbnail_refs(&mut refs, &old);
+        assert_eq!(refs[&old].len(), 1);
+        assert!(refs[&old][0].upgrade().is_some());
+        drop(row);
+        prune_dead_thumbnail_refs(&mut refs, &old);
+        assert!(!refs.contains_key(&old));
+        assert!(refs[&next][0].upgrade().is_some());
+    }
+
+    #[test]
     fn wallpaper_geometry_keeps_four_rows_before_a_preview() {
         let geometry = chooser_geometry(ChooseLayout::Wallpapers, 99, 900);
         assert_eq!(geometry.scroll_height, 480);
         assert_eq!(geometry.preview_height, Some(210));
+    }
+
+    #[test]
+    fn wallpaper_preview_fills_dialog_content_and_keeps_decode_detail() {
+        let (width, height, decode_height) = wallpaper_preview_dimensions(1040, 210);
+        assert_eq!(width, 1008);
+        assert_eq!(height, 210);
+        assert_eq!(decode_height, 567);
+
+        let (width, height, decode_height) = wallpaper_preview_dimensions(680, 240);
+        assert_eq!((width, height, decode_height), (648, 240, 364));
     }
 
     #[test]

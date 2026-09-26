@@ -219,6 +219,78 @@ cat >"$theme_json" <<'JSON'
     }
   },
   {
+    "id": "twilight",
+    "label": "Twilight",
+    "subtitle": "Violet",
+    "palette": {
+      "mode": "dark",
+      "background": "#48315c",
+      "surface": "#654776",
+      "foreground": "#f4eafb",
+      "accent": "#d49dec"
+    }
+  },
+  {
+    "id": "ember",
+    "label": "Ember",
+    "subtitle": "Copper",
+    "palette": {
+      "mode": "dark",
+      "background": "#67402d",
+      "surface": "#84563b",
+      "foreground": "#fff0de",
+      "accent": "#e4a46d"
+    }
+  },
+  {
+    "id": "forest",
+    "label": "Forest",
+    "subtitle": "Moss",
+    "palette": {
+      "mode": "dark",
+      "background": "#34593d",
+      "surface": "#487550",
+      "foreground": "#ecf5e9",
+      "accent": "#a2d589"
+    }
+  },
+  {
+    "id": "lagoon",
+    "label": "Lagoon",
+    "subtitle": "Teal",
+    "palette": {
+      "mode": "dark",
+      "background": "#286471",
+      "surface": "#397d8a",
+      "foreground": "#e5f9f6",
+      "accent": "#7bcfc7"
+    }
+  },
+  {
+    "id": "cobalt",
+    "label": "Cobalt",
+    "subtitle": "Blue",
+    "palette": {
+      "mode": "dark",
+      "background": "#344b84",
+      "surface": "#4965a1",
+      "foreground": "#e9efff",
+      "accent": "#a3beec"
+    }
+  },
+  {
+    "id": "rose",
+    "label": "Rose",
+    "subtitle": "Berry",
+    "palette": {
+      "mode": "dark",
+      "background": "#743c60",
+      "surface": "#92517a",
+      "foreground": "#ffe9f1",
+      "accent": "#e69abf"
+    }
+  },
+  {
     "id": "dawn",
     "label": "Dawn",
     "subtitle": "Light",
@@ -275,14 +347,14 @@ cat >"$wallpaper_json" <<JSON
 ]
 JSON
 
-# The dark, motion-free configuration makes completion frames deterministic.
+# The blurred dark run keeps motion enabled so the stable-frame captures
+# exercise selection animations as well as their settled destinations.
 # The launcher matrix defaults the nested output to 1.25 scale, making a
 # compact fractional display where rows have to scroll instead of falling below
 # the physical host window. Callers may override TOPBAR_SMOKE_SCALE to inspect
 # another output shape.
 config="$fixtures/launcher-dialogs-dark.toml"
 sed -e 's/^exec = .*/exec = "\/bin\/echo BTC"/' \
-    -e 's/^animations = true$/animations = false/' \
   crates/topbar-core/tests/fixtures/live-config.toml >"$config"
 cat >>"$config" <<CONFIG
 
@@ -295,8 +367,8 @@ theme_command = ["/bin/true"]
 wallpaper_command = ["/bin/true"]
 CONFIG
 
-grep -q '^animations = false$' "$config" || {
-  echo "could not disable motion in launcher smoke config" >&2
+grep -q '^animations = true$' "$config" || {
+  echo "could not enable motion in launcher smoke config" >&2
   exit 1
 }
 grep -q 'file_roots' "$config" || {
@@ -306,13 +378,18 @@ grep -q 'file_roots' "$config" || {
 
 light_config="$fixtures/launcher-dialogs-light.toml"
 sed -e 's/^mode = "dark"$/mode = "light"/' \
-    -e 's/^blur = true$/blur = false/' "$config" >"$light_config"
+    -e 's/^blur = true$/blur = false/' \
+    -e 's/^animations = true$/animations = false/' "$config" >"$light_config"
 grep -q '^mode = "light"$' "$light_config" || {
   echo "could not create light dialog config" >&2
   exit 1
 }
 grep -q '^blur = false$' "$light_config" || {
   echo "could not disable blur in light fallback config" >&2
+  exit 1
+}
+grep -q '^animations = false$' "$light_config" || {
+  echo "could not disable motion in light fallback config" >&2
   exit 1
 }
 

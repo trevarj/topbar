@@ -22,8 +22,6 @@ use topbar_core::theme::{Palette, Rgb};
 const SURFACE_OPACITY: f64 = 0.92;
 /// Alpha of the hairline border every elevated surface carries.
 const SURFACE_BORDER_ALPHA: f64 = 0.08;
-/// Leave some wallpaper visible without letting it compete with launcher text.
-const LAUNCHER_SCRIM_OPACITY: f64 = 0.78;
 
 /// Corner radius of a popover surface, in pixels.
 ///
@@ -180,7 +178,6 @@ fn root_block(config: &Config) -> String {
     --shadow-modal: 0 4px 14px var(--color-popover-shadow);
     --color-card: {card};
     --color-launcher-backdrop: {launcher_backdrop};
-    --color-launcher-scrim: {launcher_scrim};
 
     /* Panel-button states */
     --color-widget-hover: {hover};
@@ -236,7 +233,6 @@ fn root_block(config: &Config) -> String {
         popover_shadow = Rgb::new(0, 0, 0).to_rgba(0.28),
         card = palette.foreground.to_rgba(0.06),
         launcher_backdrop = palette.background.to_hex(),
-        launcher_scrim = palette.background.to_rgba(LAUNCHER_SCRIM_OPACITY),
         hover = palette.foreground.to_rgba(0.1),
         pressed = palette.foreground.to_rgba(0.15),
         checked = palette.foreground.to_rgba(0.18),
@@ -1146,20 +1142,17 @@ button.dialog-button-primary:hover {
 }
 
 /* The opaque palette color is the safe default until compositor blur is usable.
-   With blur, the palette scrim lets the wallpaper show through. */
+   A 20% painted tint keeps the blurred backdrop mapped for click-away dismissal. */
 .launcher-backdrop {
     background-color: var(--color-launcher-backdrop);
 }
 
 .launcher-backdrop-blurred {
-    background-color: var(--color-launcher-scrim);
+    background-color: rgba(128, 128, 128, 0.2);
 }
 
 .launcher {
-    background-color: var(--color-popover);
-    border: 1px solid var(--color-surface-border);
-    border-radius: var(--radius-popover);
-    box-shadow: var(--shadow-modal);
+    background: transparent;
     color: var(--color-foreground);
     font-family: var(--font-family);
     font-size: var(--launcher-font-size);
@@ -1171,8 +1164,7 @@ entry.launcher-search {
     /* Keep the insertion caret comfortably inside the pill outline. */
     padding: 6px 20px;
     background: none;
-    background-color: var(--color-card);
-    border: 1px solid transparent;
+    border: 1px solid var(--color-foreground-muted);
     border-radius: 9999px;
     box-shadow: none;
     color: var(--color-foreground);
@@ -1380,9 +1372,12 @@ button.chooser-result-current {
 
 .chooser-preview,
 .chooser-theme-sample {
-    padding: 8px;
     background-color: var(--color-card);
     border-radius: var(--radius-card);
+}
+
+.chooser-theme-sample {
+    padding: 8px;
 }
 
 .chooser-preview-image,
@@ -2922,23 +2917,6 @@ mod tests {
     }
 
     #[test]
-    fn launcher_backdrop_uses_palette_scrim_and_opaque_default() {
-        let mut config = Config::default();
-        config.theme.mode = "light".into();
-        config.theme.palette.background = Some("#dce6f0".into());
-        let css = generate(&config);
-
-        assert!(css.contains("--color-launcher-backdrop: #dce6f0;"));
-        assert!(css.contains("--color-launcher-scrim: rgba(220, 230, 240, 0.78);"));
-        assert!(css.contains(
-            ".launcher-backdrop {\n    background-color: var(--color-launcher-backdrop);"
-        ));
-        assert!(css.contains(
-            ".launcher-backdrop-blurred {\n    background-color: var(--color-launcher-scrim);"
-        ));
-    }
-
-    #[test]
     fn standalone_dialogs_use_opaque_palette_surface() {
         for (mode, surface) in [("light", "#dce6f0"), ("dark", "#18212a")] {
             let mut config = Config::default();
@@ -3006,12 +2984,7 @@ mod tests {
         assert!(css.contains("--shadow-popover: 0 1px 4px var(--color-popover-shadow);"));
         assert!(css.contains("--shadow-modal: 0 4px 14px var(--color-popover-shadow);"));
 
-        for selector in [
-            ".location-dialog",
-            ".launcher",
-            ".chooser-dialog",
-            ".pinentry-dialog",
-        ] {
+        for selector in [".location-dialog", ".chooser-dialog", ".pinentry-dialog"] {
             let rule = css
                 .split_once(&format!("{selector} {{"))
                 .and_then(|(_, rest)| rest.split_once('}'))

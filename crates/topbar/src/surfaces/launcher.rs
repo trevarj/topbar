@@ -339,6 +339,8 @@ struct Launcher {
     search: Entry,
     filters: Vec<(Filter, Button)>,
     scroll: ScrolledWindow,
+    scroll_motion: Animation,
+    scroll_target: Rc<Cell<Option<f64>>>,
     results: gtk4::Box,
     status: Label,
     section_statuses: RefCell<SectionStatusLabels>,
@@ -453,6 +455,7 @@ impl Launcher {
         window.set_child(Some(&root));
 
         let container_motion = Animation::new(&root);
+        let scroll_motion = Animation::new(&scroll);
         let file_catalog_revision = services.files.current().catalog_revision;
         let launcher = Rc::new(Self {
             _input: input,
@@ -466,6 +469,8 @@ impl Launcher {
             search,
             filters,
             scroll,
+            scroll_motion,
+            scroll_target: Rc::new(Cell::new(None)),
             results,
             status,
             section_statuses: RefCell::new(SectionStatusLabels::default()),
@@ -536,6 +541,19 @@ impl Launcher {
         click.set_button(gdk::BUTTON_PRIMARY);
         click.connect_released(|_, _, _, _| dismiss());
         self.backdrop.add_controller(click);
+        let wheel = gtk4::EventControllerScroll::new(gtk4::EventControllerScrollFlags::VERTICAL);
+        wheel.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        wheel.connect_scroll({
+            let launcher = Rc::downgrade(self);
+            move |_, _, _| {
+                if let Some(launcher) = launcher.upgrade() {
+                    launcher.scroll_motion.cancel();
+                    launcher.scroll_target.set(None);
+                }
+                glib::Propagation::Proceed
+            }
+        });
+        self.scroll.add_controller(wheel);
 
         self.window.connect_close_request(|_| {
             CURRENT.with_borrow_mut(|current| current.take());
@@ -738,13 +756,24 @@ impl Launcher {
         };
         let adjustment = self.scroll.vadjustment();
         let current = adjustment.value();
+        let page = adjustment.page_size();
         let target_start = f64::from(bounds.y());
         let target_end = target_start + f64::from(bounds.height());
-        if let Some(value) =
-            scroll_value_for_bounds(current, adjustment.page_size(), target_start, target_end)
-        {
-            adjustment.set_value(value);
-        }
+        let base = self.scroll_target.get().unwrap_or(current);
+        let Some(value) = scroll_value_for_bounds(base, page, target_start, target_end) else {
+            return;
+        };
+        let target = value.clamp(
+            adjustment.lower(),
+            (adjustment.upper() - page).max(adjustment.lower()),
+        );
+        self.scroll_target.set(Some(target));
+        let on_done = Rc::clone(&self.scroll_target);
+        self.scroll_motion.start(
+            AnimationParams::new(180).with_easing(Easing::EaseOutCubic),
+            Box::new(move |progress| adjustment.set_value(current + (target - current) * progress)),
+            Some(Box::new(move || on_done.set(None))),
+        );
     }
 
     fn render(&self) {
@@ -864,6 +893,8 @@ impl Launcher {
         files: &FileSearchState,
         windows: &WindowsSnapshot,
     ) {
+        self.scroll_motion.cancel();
+        self.scroll_target.set(None);
         while let Some(child) = self.results.first_child() {
             self.results.remove(&child);
         }
@@ -1048,25 +1079,6 @@ impl Launcher {
         subtitle.set_markup(&highlight(&item.subtitle(), &self.search.text()));
         body.append(&subtitle);
         button.set_child(Some(&body));
-        let interaction_motion = Animation::new(&button);
-        let pointer = gtk4::EventControllerMotion::new();
-        pointer.connect_enter({
-            let button = button.clone();
-            let animation = interaction_motion.clone();
-            move |_, _, _| {
-                let button = button.clone();
-                animation.start(
-                    AnimationParams::new(120).with_easing(Easing::EaseOutCubic),
-                    Box::new(move |progress| button.set_opacity(0.92 + 0.08 * progress)),
-                    None,
-                );
-            }
-        });
-        pointer.connect_leave({
-            let button = button.clone();
-            move |_| button.set_opacity(1.0)
-        });
-        button.add_controller(pointer);
         let click_item = item.clone();
         button.connect_clicked(move |_| {
             CURRENT.with_borrow(|current| {

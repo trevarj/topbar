@@ -72,7 +72,9 @@ selected_card_outline() {
   minimum_y=$3
   minimum_vertical=$4
   maximum_bottom=$5
-  magick "$frame" -alpha off -fuzz 8% -fill black +opaque "$accent" -threshold 1% \
+  # The one-pixel ring is alpha-blended against the blurred desktop, so its
+  # presented pixels can be appreciably dimmer than the configured accent.
+  magick "$frame" -alpha off -fuzz 18% -fill black +opaque "$accent" -threshold 1% \
     -define connected-components:verbose=true -connected-components 4 null: 2>&1 |
     awk -v minimum_width="$minimum_width" -v minimum_y="$minimum_y" \
       -v minimum_vertical="$minimum_vertical" -v maximum_bottom="$maximum_bottom" '
@@ -271,48 +273,6 @@ assert_launcher_backdrop_layers() {
   echo "launcher backdrop: foreground and full-screen backdrop are mapped"
 }
 
-# The fullscreen GTK demo provides non-flat pixels behind every corner. The
-# launcher scrim must alter all four corners, otherwise it is only the centered
-# surface being painted. This proves backdrop coverage without assuming a
-# particular wallpaper or trying to infer compositor blur from its pixels.
-assert_launcher_backdrop_coverage() {
-  before=$art/launcher-underlay.png
-  after=$art/launcher-backdrop.png
-  [ -f "$before" ] && [ -f "$after" ] || return 1
-  image_geometry=$(magick "$before" -format '%w %h' info:)
-  IFS=' ' read -r image_width image_height <<EOF
-$image_geometry
-EOF
-  case "$image_width:$image_height" in
-    *[!0-9:]* | :* | *:) return 1 ;;
-  esac
-  crop_width=$((image_width / 8))
-  crop_height=$((image_height / 8))
-  [ "$crop_width" -gt 0 ] && [ "$crop_height" -gt 0 ] || return 1
-  report="$art/launcher-backdrop-coverage.txt"
-  : >"$report"
-  for corner in top-left top-right bottom-left bottom-right; do
-    case "$corner" in
-      top-left) crop_x=0; crop_y=0 ;;
-      top-right) crop_x=$((image_width - crop_width)); crop_y=0 ;;
-      bottom-left) crop_x=0; crop_y=$((image_height - crop_height)) ;;
-      bottom-right)
-        crop_x=$((image_width - crop_width))
-        crop_y=$((image_height - crop_height))
-        ;;
-    esac
-    difference=$(magick "$before" "$after" -compose Difference -composite \
-      -crop "${crop_width}x${crop_height}+${crop_x}+${crop_y}" +repage \
-      -colorspace Gray -format '%[fx:mean]' info:)
-    printf '%s %s\n' "$corner" "$difference" >>"$report"
-    if ! awk -v difference="$difference" 'BEGIN { exit !(difference > 0.002) }'; then
-      echo "launcher backdrop: $corner was not darkened by the full-screen scrim" >&2
-      return 1
-    fi
-  done
-  cat "$report"
-}
-
 # Four Down presses move through four grid rows, selecting Smoke Catalog 13 in
 # this deterministic fixture.  It has to scroll into view.  Require the
 # selected card's actual outline to move below the first selection while its
@@ -329,9 +289,9 @@ EOF
   case "$image_width:$image_height" in
     *[!0-9:]* | :* | *:) return 1 ;;
   esac
-  minimum_width=$((image_width / 5))
-  minimum_y=$((image_height * 2 / 5))
-  minimum_vertical=$((image_height / 16))
+  minimum_width=$((image_width / 7))
+  minimum_y=$((image_height / 4))
+  minimum_vertical=$((image_height / 24))
   maximum_bottom=$((image_height * 9 / 10))
   if ! initial_outline=$(selected_card_outline "$before" "$minimum_width" "$minimum_y" \
     "$minimum_vertical" "$maximum_bottom"); then
@@ -359,6 +319,182 @@ EOF
     "$deep_width" "$((deep_bottom - deep_top))" "$deep_x" "$deep_top" \
     >"$art/launcher-compact-scroll.txt"
 }
+
+# The first catalog tile supplies both the pixel-to-logical hover target and
+# the reference ring. Its neighbour in the next row starts just below it.
+catalog_first_outline() (
+  frame=$1
+  image_geometry=$(magick "$frame" -format '%w %h' info:) || exit 1
+  IFS=' ' read -r image_width image_height <<EOF
+$image_geometry
+EOF
+  selected_card_outline "$frame" "$((image_width / 7))" "$((image_height / 4))" \
+    "$((image_height / 24))" "$((image_height * 9 / 10))"
+)
+
+catalog_hover_point() (
+  first=$(catalog_first_outline "$art/launcher-catalog-before.png") || exit 1
+  IFS=' ' read -r first_x first_top first_width first_bottom <<EOF
+$first
+EOF
+  shot_scale "$((first_x + first_width / 2))" \
+    "$((first_bottom + (first_bottom - first_top) / 2 + first_width / 24))"
+)
+
+assert_catalog_hover_states() (
+  first=$(catalog_first_outline "$art/launcher-catalog-before.png") || exit 1
+  IFS=' ' read -r first_x first_top first_width first_bottom <<EOF
+$first
+EOF
+  image_height=$(magick "$art/launcher-catalog-before.png" -format '%h' info:) || exit 1
+  for state in hover leave leave-settled; do
+    frame="$art/launcher-catalog-$state.png"
+    outline=$(selected_card_outline "$frame" "$((first_width * 3 / 4))" \
+      "$first_top" "$((image_height / 24))" "$((first_bottom + 1))") || {
+      echo "catalog hover: keyboard-selected first tile lost its ring in $state" >&2
+      exit 1
+    }
+    IFS=' ' read -r x top width bottom <<EOF
+$outline
+EOF
+    if [ "$x" -ne "$first_x" ] || [ "$top" -ne "$first_top" ] || \
+      [ "$width" -ne "$first_width" ] || [ "$bottom" -ne "$first_bottom" ]; then
+      echo "catalog hover: keyboard-selected tile moved or lost its ring in $state" >&2
+      exit 1
+    fi
+    # Restrict the second ring to the tile directly below the first. The
+    # search-entry accent and selected first tile lie above this y range.
+    neighbor=$(selected_card_outline "$frame" "$((first_width * 3 / 4))" \
+      "$((first_bottom + 1))" "$((image_height / 24))" \
+      "$((first_bottom * 2 - first_top + first_width / 12))") || neighbor=
+    if [ "$state" = hover ]; then
+      [ -n "$neighbor" ] || {
+        echo "catalog hover: unselected tile did not gain an accent ring" >&2
+        exit 1
+      }
+      IFS=' ' read -r neighbor_x neighbor_top neighbor_width neighbor_bottom <<EOF
+$neighbor
+EOF
+      if [ "$neighbor_x" -lt "$((first_x - first_width / 12))" ] || \
+        [ "$neighbor_x" -gt "$((first_x + first_width / 12))" ] || \
+        [ "$neighbor_top" -le "$first_bottom" ] || \
+        [ "$neighbor_width" -lt "$((first_width * 3 / 4))" ]; then
+        echo "catalog hover: accent ring was not on the neighbouring catalog tile" >&2
+        exit 1
+      fi
+    elif [ -n "$neighbor" ]; then
+      echo "catalog hover: unselected tile's ring reappeared after pointer leave ($state)" >&2
+      exit 1
+    fi
+  done
+)
+
+assert_launcher_wheel_and_reverse() (
+  before=$(catalog_first_outline "$art/launcher-compact-after.png") || exit 1
+  wheel=$(catalog_first_outline "$art/launcher-compact-wheel.png") || {
+    echo "launcher wheel: selected tile disappeared after native wheel input" >&2
+    exit 1
+  }
+  reverse=$(catalog_first_outline "$art/launcher-compact-reverse.png") || {
+    echo "launcher wheel: reverse Up selection is clipped or absent" >&2
+    exit 1
+  }
+  IFS=' ' read -r before_x before_y before_width before_bottom <<EOF
+$before
+EOF
+  IFS=' ' read -r wheel_x wheel_y wheel_width wheel_bottom <<EOF
+$wheel
+EOF
+  IFS=' ' read -r reverse_x reverse_y reverse_width reverse_bottom <<EOF
+$reverse
+EOF
+  if [ "$wheel_x" -ne "$before_x" ] || [ "$wheel_y" -ge "$before_y" ] || \
+    [ "$reverse_x" -ne "$before_x" ] || [ "$reverse_y" -ge "$wheel_y" ]; then
+    echo "launcher wheel: wheel did not scroll content up or Up did not select a visible prior row" >&2
+    exit 1
+  fi
+)
+
+wallpaper_selected_outline() (
+  frame=$1
+  image_geometry=$(magick "$frame" -format '%w %h' info:) || exit 1
+  IFS=' ' read -r image_width image_height <<EOF
+$image_geometry
+EOF
+  selected_card_outline "$frame" "$((image_width / 7))" \
+    "$((image_height / 3))" "$((image_height / 24))" \
+    "$((image_height * 9 / 10))"
+)
+
+assert_wallpaper_wheel_and_reverse() (
+  wallpaper_selected_outline "$art/chooser-wallpapers-scrolled.png" >/dev/null || {
+    echo "wallpaper chooser: sixth selected row was clipped after five Down keys" >&2
+    exit 1
+  }
+  wallpaper_selected_outline "$art/chooser-wallpapers-reverse.png" >/dev/null || {
+    echo "wallpaper chooser: selected row was clipped after wheel and Up" >&2
+    exit 1
+  }
+  difference=$(magick "$art/chooser-wallpapers-scrolled.png" \
+    "$art/chooser-wallpapers-wheel.png" -compose Difference -composite \
+    -gravity center -crop '50%x40%+0+0' +repage \
+    -colorspace Gray -format '%[fx:mean]' info:) || exit 1
+  if ! awk -v difference="$difference" 'BEGIN { exit !(difference > 0.002) }'; then
+    echo "wallpaper chooser: native wheel did not change the results viewport" >&2
+    exit 1
+  fi
+)
+
+# The first theme swatch is opaque and fixed in the results viewport. Its
+# background stripe must change after navigating past the four visible rows;
+# a moved selection ring alone does not prove the list actually scrolled.
+assert_theme_results_scrolled() (
+  before="$art/chooser-themes-dark.png"
+  after="$art/chooser-themes-scrolled.png"
+  image_geometry=$(magick "$before" -format '%w %h' info:) || exit 1
+  IFS=' ' read -r image_width image_height <<EOF
+$image_geometry
+EOF
+  minimum_width=$((image_width / 7))
+  minimum_y=$((image_height / 4))
+  minimum_vertical=$((image_height / 32))
+  maximum_bottom=$((image_height * 9 / 10))
+  first=$(selected_card_outline "$before" "$minimum_width" "$minimum_y" \
+    "$minimum_vertical" "$maximum_bottom") || {
+    echo "theme chooser: initial selected row is absent" >&2
+    exit 1
+  }
+  deep=$(selected_card_outline "$after" "$minimum_width" "$minimum_y" \
+    "$minimum_vertical" "$maximum_bottom") || {
+    echo "theme chooser: eighth selected row is clipped or absent" >&2
+    exit 1
+  }
+  IFS=' ' read -r first_x first_top first_width first_bottom <<EOF
+$first
+EOF
+  IFS=' ' read -r deep_x deep_top deep_width deep_bottom <<EOF
+$deep
+EOF
+  row_height=$((first_bottom - first_top))
+  if [ "$deep_x" -ne "$first_x" ] || \
+    [ "$deep_top" -le $((first_top + row_height * 2)) ] || \
+    [ "$((deep_bottom - deep_top))" -lt "$((row_height - 4))" ]; then
+    echo "theme chooser: eighth row did not scroll fully into the viewport" >&2
+    exit 1
+  fi
+  stripe_x=$((first_x + 24))
+  stripe_y=$((first_top + row_height / 2 - 6))
+  difference=$(magick \
+    \( "$before" -crop "12x12+${stripe_x}+${stripe_y}" +repage \) \
+    \( "$after" -crop "12x12+${stripe_x}+${stripe_y}" +repage \) \
+    -compose Difference -composite -colorspace Gray -format '%[fx:mean]' info:) || exit 1
+  if ! awk -v difference="$difference" 'BEGIN { exit !(difference > 0.04) }'; then
+    echo "theme chooser: results swatch stayed in place after seven Down keys" >&2
+    exit 1
+  fi
+  printf 'theme selected row %s -> %s; first-row swatch difference %s\n' \
+    "$first" "$deep" "$difference" >"$art/chooser-themes-scroll.txt"
+)
 
 # The exact smoke query has exactly one matching file.  Its selected result
 # takes nearly the whole dialog width, so outline geometry pins this check to
@@ -669,10 +805,9 @@ check ensure_demo_backdrop
 blur_before=$(blur_effect_creations)
 check show_launcher
 check wait_for_launcher_blur "$blur_before"
-check shot launcher-backdrop topbar-launcher
+check shot launcher-clear-blur topbar-launcher
 check assert_launcher_backdrop_layers
-check assert_launcher_backdrop_coverage
-cp "$art/launcher-backdrop.png" "$art/launcher-frequent.png"
+cp "$art/launcher-clear-blur.png" "$art/launcher-frequent.png"
 type_text "Smoke Editor"
 check shot launcher-applications topbar-launcher
 key_press Escape
@@ -713,13 +848,64 @@ fi
 echo "--- launcher compact output scroll accessibility"
 check show_launcher
 type_text "Smoke Catalog"
-check shot launcher-compact-before topbar-launcher
+check shot launcher-catalog-before topbar-launcher
+cp "$art/launcher-catalog-before.png" "$art/launcher-compact-before.png"
+if hover_xy=$(catalog_hover_point); then
+  IFS=' ' read -r hover_x hover_y <<EOF
+$hover_xy
+EOF
+  pointer_to "$hover_x" "$hover_y"
+  check shot launcher-catalog-hover topbar-launcher
+  if away_y=$(backdrop_y); then
+    pointer_to 8 "$away_y"
+    check shot launcher-catalog-leave topbar-launcher
+    check shot launcher-catalog-leave-settled topbar-launcher
+    check assert_catalog_hover_states
+  else
+    echo "catalog hover: could not determine pointer parking point" >&2
+    fail=1
+  fi
+else
+  echo "catalog hover: could not locate selected fixture tile" >&2
+  fail=1
+fi
 key_press Down
 key_press Down
 key_press Down
 key_press Down
 check shot launcher-compact-after topbar-launcher
 check assert_launcher_results_scrolled
+# Manual GTK scrolling must move the viewport, and keyboard navigation must
+# still select the prior row after canceling any pending scroll animation.
+if deep_outline=$(catalog_first_outline "$art/launcher-compact-after.png"); then
+  IFS=' ' read -r deep_x deep_top deep_width deep_bottom <<EOF
+$deep_outline
+EOF
+  if wheel_xy=$(shot_scale "$((deep_x + deep_width / 2))" \
+    "$((deep_top + (deep_bottom - deep_top) / 2))") && away_y=$(backdrop_y); then
+    IFS=' ' read -r wheel_x wheel_y <<EOF
+$wheel_xy
+EOF
+    scroll_at "$wheel_x" "$wheel_y" 35
+    pointer_to 8 "$away_y"
+    check shot launcher-compact-wheel topbar-launcher
+    key_press Up
+    check shot launcher-compact-reverse topbar-launcher
+    check assert_launcher_wheel_and_reverse
+    key_press Down
+    check shot launcher-compact-restored topbar-launcher
+    if ! catalog_first_outline "$art/launcher-compact-restored.png" >/dev/null; then
+      echo "launcher wheel: restored lower result selection is clipped" >&2
+      fail=1
+    fi
+  else
+    echo "launcher wheel: could not locate the selected fixture tile" >&2
+    fail=1
+  fi
+else
+  echo "launcher wheel: lower fixture tile has no visible selection ring" >&2
+  fail=1
+fi
 key_press Return
 check assert_unmapped topbar-launcher "deep compact launcher result activates"
 
@@ -879,6 +1065,21 @@ wait "$SMOKE_PANEL_PID" 2>/dev/null || true
 echo "--- standalone dark and light theme choosers"
 check start_chooser themes-dark "$SMOKE_CONFIG" themes moonlight "$theme_json"
 check shot chooser-themes-dark topbar-chooser
+# Eight ordered themes exceed the four-row viewport. Keyboard focus must
+# scroll the last row into view, not merely move the selected CSS class.
+key_press Down
+key_press Down
+key_press Down
+key_press Down
+key_press Down
+key_press Down
+key_press Down
+check shot chooser-themes-scrolled topbar-chooser
+check assert_theme_results_scrolled
+# Home returns focus to the first result; Shift+Tab returns it to Search so
+# typing still filters rather than going to the focused theme button.
+key_press Home
+wtype -M shift -k Tab -m shift
 type_text "dawn"
 check shot chooser-themes-filtered topbar-chooser
 key_press Return
@@ -908,6 +1109,30 @@ key_press Down
 key_press Down
 key_press Down
 check shot chooser-wallpapers-scrolled topbar-chooser
+if selected_wallpaper=$(wallpaper_selected_outline "$art/chooser-wallpapers-scrolled.png"); then
+  IFS=' ' read -r wallpaper_x wallpaper_top wallpaper_width wallpaper_bottom <<EOF
+$selected_wallpaper
+EOF
+  if wheel_xy=$(shot_scale "$((wallpaper_x + wallpaper_width / 2))" \
+    "$((wallpaper_top + (wallpaper_bottom - wallpaper_top) / 2))") && \
+    away_y=$(backdrop_y); then
+    IFS=' ' read -r wheel_x wheel_y <<EOF
+$wheel_xy
+EOF
+    scroll_at "$wheel_x" "$wheel_y" -45
+    pointer_to 8 "$away_y"
+    check shot chooser-wallpapers-wheel topbar-chooser
+    key_press Up
+    check shot chooser-wallpapers-reverse topbar-chooser
+    check assert_wallpaper_wheel_and_reverse
+  else
+    echo "wallpaper chooser: could not locate wheel target" >&2
+    fail=1
+  fi
+else
+  echo "wallpaper chooser: selected sixth row is not visible" >&2
+  fail=1
+fi
 type_text "unreadable"
 # `shot` waits for an actually presented, settled frame.  The invalid image is
 # small and the chooser rerenders once decode failure reaches the main thread,
