@@ -1,8 +1,9 @@
 //! The panel-owned full-screen application, window and filename launcher.
 //!
-//! The launcher intentionally owns one layer surface at a time.  Its result
-//! model uses stable identities rather than row indexes, so a file-discovery or
-//! compositor update can redraw the list without changing what Enter means.
+//! The launcher owns a centered input surface and a full-screen backdrop. Its
+//! result model uses stable identities rather than row indexes, so a
+//! file-discovery or compositor update can redraw the list without changing
+//! what Enter means.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -364,9 +365,13 @@ impl Launcher {
         monitor: Option<&gdk::Monitor>,
         input: topbar_services::ipc::InputLock,
     ) -> Rc<Self> {
-        // The backdrop shares the launcher namespace: the niri rule that owns
-        // wallpaper xray/blur applies to the actual full-screen surface.
-        let backdrop = modal::backdrop(monitor, "topbar-launcher", classes::LAUNCHER_BACKDROP);
+        // This has its own namespace so niri can apply a full-screen effect to
+        // the backdrop without also applying it to the centered launcher.
+        let backdrop = modal::backdrop(
+            monitor,
+            "topbar-launcher-backdrop",
+            classes::LAUNCHER_BACKDROP,
+        );
         let backdrop_blur = modal::attach_backdrop_blur(&backdrop);
         if backdrop_blur.is_available()
             && let Some(surface) = backdrop.child()
@@ -568,7 +573,7 @@ impl Launcher {
         keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
         keys.connect_key_pressed({
             let launcher = Rc::downgrade(self);
-            move |_, key, _, modifiers| {
+            move |_, key, _, _| {
                 let Some(launcher) = launcher.upgrade() else {
                     return glib::Propagation::Proceed;
                 };
@@ -578,8 +583,7 @@ impl Launcher {
                     gdk::Key::Up => launcher.move_selection(Direction::Up),
                     gdk::Key::Right => launcher.move_selection(Direction::Right),
                     gdk::Key::Left => launcher.move_selection(Direction::Left),
-                    gdk::Key::Return | gdk::Key::KP_Enter => launcher
-                        .activate_selected(modifiers.contains(gdk::ModifierType::CONTROL_MASK)),
+                    gdk::Key::Return | gdk::Key::KP_Enter => launcher.activate_selected(),
                     _ => return glib::Propagation::Proceed,
                 }
                 glib::Propagation::Stop
@@ -1067,7 +1071,7 @@ impl Launcher {
         button.connect_clicked(move |_| {
             CURRENT.with_borrow(|current| {
                 if let Some(launcher) = current.as_ref() {
-                    launcher.activate(click_item.clone(), false);
+                    launcher.activate(click_item.clone());
                 }
             });
         });
@@ -1143,15 +1147,15 @@ impl Launcher {
         }
     }
 
-    fn activate_selected(&self, fresh: bool) {
+    fn activate_selected(&self) {
         if let Some(item) = self.items.borrow().get(self.selected_index.get()).cloned() {
-            self.activate(item, fresh);
+            self.activate(item);
         }
     }
 
-    fn activate(&self, item: ResultItem, fresh: bool) {
+    fn activate(&self, item: ResultItem) {
         if let ResultItem::Application(app) = &item {
-            self.activate_application(app.clone(), fresh);
+            self.launch_application(app.clone());
             return;
         }
         if let ResultItem::File(file) = &item {
@@ -1191,47 +1195,6 @@ impl Launcher {
             glib::idle_add_once(move || match outcome {
                 Ok(()) => dismiss_instance(instance),
                 Err(error) => status_instance(instance, &format!("{result_id}: {error}")),
-            });
-        });
-    }
-
-    fn activate_application(&self, app: Application, fresh: bool) {
-        if fresh {
-            self.launch_application(app);
-            return;
-        }
-
-        // The stream snapshot is intentionally not used for this decision:
-        // it can be empty during startup or reconnecting while niri still has
-        // a matching window. The service makes one live query off GTK's main
-        // thread and launches only after niri confirms no match exists.
-        let identities = app.identities().map(str::to_owned).collect::<Vec<_>>();
-        let services = self.services.clone();
-        let desktop_id = app.desktop_id.clone();
-        let instance = self.instance;
-        topbar_services::Runtime::handle().spawn(async move {
-            let identity_refs = identities.iter().map(String::as_str).collect::<Vec<_>>();
-            let result = services
-                .compositor
-                .handle()
-                .focus_application(&identity_refs)
-                .await;
-            if matches!(result, Ok(true)) {
-                services
-                    .launcher_usage
-                    .record(&desktop_id, chrono::Utc::now().timestamp());
-            }
-            glib::idle_add_once(move || match result {
-                Ok(true) => dismiss_instance(instance),
-                Ok(false) => CURRENT.with_borrow(|current| {
-                    if let Some(launcher) = current
-                        .as_ref()
-                        .filter(|launcher| launcher.instance == instance)
-                    {
-                        launcher.launch_application(app);
-                    }
-                }),
-                Err(error) => status_instance(instance, &error.to_string()),
             });
         });
     }
@@ -1289,7 +1252,7 @@ fn app_menu(anchor: &gtk4::Widget, app: Application) {
     launch.connect_clicked(move |_| {
         CURRENT.with_borrow(|current| {
             if let Some(launcher) = current.as_ref() {
-                launcher.activate(ResultItem::Application(app.clone()), true);
+                launcher.activate(ResultItem::Application(app.clone()));
             }
         })
     });
@@ -1309,7 +1272,7 @@ fn file_menu(anchor: &gtk4::Widget, file: FileEntry) {
         action.connect_clicked(move |_| match label {
             "Open" => CURRENT.with_borrow(|current| {
                 if let Some(launcher) = current.as_ref() {
-                    launcher.activate(ResultItem::File(file.clone()), false);
+                    launcher.activate(ResultItem::File(file.clone()));
                 }
             }),
             "Show in Files" => {

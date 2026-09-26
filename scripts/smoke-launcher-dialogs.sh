@@ -62,7 +62,9 @@ Comment=Second launcher application fixture
 Exec=true
 Icon=utilities-terminal
 Keywords=smoke;terminal;shell;
-StartupWMClass=TopbarSmokeTerminal
+# Match the GTK Demo window opened behind the launcher. Enter must launch this
+# desktop entry even when niri reports an existing window with its identity.
+StartupWMClass=org.gtk.Demo4
 Terminal=true
 DESKTOP
 

@@ -245,6 +245,17 @@ layer-rule {
         xray false
     }
 }
+
+// Mirror the deployed backdrop rule so visual captures exercise the same
+// full-output blur as the live launcher and chooser.
+layer-rule {
+    match namespace=r#"^topbar-(launcher|chooser)-backdrop$"#
+
+    background-effect {
+        xray false
+        blur true
+    }
+}
 KDL
 
 # The nested window is however big the *host* compositor made it, which is

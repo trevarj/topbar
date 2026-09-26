@@ -27,6 +27,7 @@ use crate::cli::ChooseLayout;
 use crate::ipc_client;
 use crate::style::{self, classes};
 use crate::surfaces::modal;
+use crate::wayland::blur::BlurAttachment;
 
 /// Refuse a pipe large enough to make an accidental binary input painful.
 const MAX_INPUT_BYTES: u64 = 8 * 1024 * 1024;
@@ -541,6 +542,10 @@ pub fn run(
                 settings.set_gtk_icon_theme_name(Some(&config.theme.icons.theme));
             }
             style::apply(&config);
+            // Unlike the panel, this process does not pass through
+            // `app::start`, so initialise the compositor protocol before the
+            // backdrop attaches its full-screen blur region.
+            crate::wayland::blur::init(&display, config.theme.blur);
             let chooser = Chooser::new(
                 app.clone(),
                 &display,
@@ -691,11 +696,26 @@ fn retained_selection(
         .or_else(|| visible.first().map(|&index| candidates[index].id.clone()))
 }
 
+/// Return the adjustment value that makes a row visible without moving an
+/// already visible selection.
+fn scroll_value_for_bounds(current: f64, page: f64, start: f64, end: f64) -> Option<f64> {
+    if start < current {
+        Some(start)
+    } else if end > current + page {
+        Some(end - page)
+    } else {
+        None
+    }
+}
+
 /// Live chooser widgets and their small local state.
 struct Chooser {
     app: Application,
     window: Window,
     backdrop: Window,
+    // Keeps the compositor effect alive for the full-screen backdrop rather
+    // than the small foreground dialog.
+    _backdrop_blur: BlurAttachment,
     root: gtk4::Box,
     container_motion: Animation,
     layout: ChooseLayout,
@@ -739,6 +759,7 @@ impl Chooser {
             "topbar-chooser-backdrop",
             classes::CHOOSER_BACKDROP,
         );
+        let backdrop_blur = modal::attach_backdrop_blur(&backdrop);
         let window = modal::centered_window(monitor.as_ref(), "topbar-chooser");
         window.add_css_class(classes::CHOOSER_WINDOW);
 
@@ -848,6 +869,7 @@ impl Chooser {
             app,
             window,
             backdrop,
+            _backdrop_blur: backdrop_blur,
             root,
             container_motion,
             layout,
@@ -1058,6 +1080,40 @@ impl Chooser {
         *self.selected.borrow_mut() = Some(self.candidates[index].id.clone());
         self.update_apply_sensitivity();
         self.render();
+        // `render` replaces every row. Let GTK allocate the replacement rows
+        // before comparing their content coordinates to the scroll offset.
+        // Reading the current selection inside the idle keeps a burst of key
+        // presses coalesced to the final row.
+        let chooser = Rc::downgrade(self);
+        glib::idle_add_local_once(move || {
+            if let Some(chooser) = chooser.upgrade() {
+                chooser.scroll_selected_into_view();
+            }
+        });
+    }
+
+    fn scroll_selected_into_view(&self) {
+        let selected = self.selected.borrow();
+        let Some(selected) = selected.as_deref() else {
+            return;
+        };
+        let rows = self.row_widgets.borrow();
+        let Some((_, row)) = rows
+            .iter()
+            .find(|(index, _)| self.candidates[*index].id.as_str() == selected)
+        else {
+            return;
+        };
+        let Some(bounds) = row.compute_bounds(&self.results) else {
+            return;
+        };
+        let adjustment = self.scroll.vadjustment();
+        let current = adjustment.value();
+        let start = f64::from(bounds.y());
+        let end = start + f64::from(bounds.height());
+        if let Some(value) = scroll_value_for_bounds(current, adjustment.page_size(), start, end) {
+            adjustment.set_value(value);
+        }
     }
 
     fn accept(self: &Rc<Self>) {
@@ -1836,6 +1892,19 @@ mod tests {
             retained_selection(&candidates, &[0], Some("same-label-b")),
             Some("same-label-a".to_string())
         );
+    }
+
+    #[test]
+    fn selected_row_scrolls_using_content_coordinates() {
+        assert_eq!(
+            scroll_value_for_bounds(300.0, 200.0, 520.0, 550.0),
+            Some(350.0)
+        );
+        assert_eq!(
+            scroll_value_for_bounds(300.0, 200.0, 250.0, 280.0),
+            Some(250.0)
+        );
+        assert_eq!(scroll_value_for_bounds(300.0, 200.0, 320.0, 360.0), None);
     }
 
     #[test]

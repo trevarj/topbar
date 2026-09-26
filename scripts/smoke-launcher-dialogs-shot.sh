@@ -262,12 +262,13 @@ wait_for_launcher_blur() {
 
 assert_launcher_backdrop_layers() {
   niri msg layers >"$art/launcher-backdrop-layers.txt" 2>&1 || return 1
-  surfaces=$(grep -o '"topbar-launcher"' "$art/launcher-backdrop-layers.txt" | wc -l | tr -d ' ')
-  if [ "$surfaces" -lt 2 ]; then
-    echo "launcher backdrop: expected foreground and full-screen backdrop, saw ${surfaces} surfaces" >&2
+  foregrounds=$(grep -o '"topbar-launcher"' "$art/launcher-backdrop-layers.txt" | wc -l | tr -d ' ')
+  backdrops=$(grep -o '"topbar-launcher-backdrop"' "$art/launcher-backdrop-layers.txt" | wc -l | tr -d ' ')
+  if [ "$foregrounds" -ne 1 ] || [ "$backdrops" -ne 1 ]; then
+    echo "launcher backdrop: expected one foreground and one full-screen backdrop, saw ${foregrounds} and ${backdrops}" >&2
     return 1
   fi
-  echo "launcher backdrop: ${surfaces} launcher layer surfaces are mapped"
+  echo "launcher backdrop: foreground and full-screen backdrop are mapped"
 }
 
 # The fullscreen GTK demo provides non-flat pixels behind every corner. The
@@ -482,6 +483,22 @@ wait_for_marker() {
     waited=$((waited + 1))
   done
   echo "$description was never observed" >&2
+  return 1
+}
+
+wait_for_terminal_launches() {
+  expected=$1
+  waited=0
+  while [ "$waited" -lt 20 ]; do
+    observed=$(grep -c '^terminal helper invoked$' "$terminal_log" 2>/dev/null || true)
+    if [ "$observed" -ge "$expected" ]; then
+      echo "terminal helper launched ${observed} time(s) after ${waited}s"
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  echo "terminal helper launched fewer than ${expected} time(s)" >&2
   return 1
 }
 
@@ -711,8 +728,16 @@ check show_launcher
 type_text "Smoke Terminal"
 check shot launcher-terminal topbar-launcher
 key_press Return
-check wait_for_marker "$terminal_log" "terminal helper launch"
+check wait_for_terminal_launches 1
 check assert_unmapped topbar-launcher "successful terminal launch closes launcher"
+# Enter always starts an application, including when a previous invocation of
+# that same desktop entry completed. It must not be converted into a focus-only
+# compositor action for terminal applications such as Kitty.
+check show_launcher
+type_text "Smoke Terminal"
+key_press Return
+check wait_for_terminal_launches 2
+check assert_unmapped topbar-launcher "repeat terminal launch closes launcher"
 cp "$terminal_log" "$art/terminal-launch.log" 2>/dev/null || true
 
 echo "--- launcher private D-Bus activation"
