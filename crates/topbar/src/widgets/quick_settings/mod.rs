@@ -58,6 +58,7 @@ impl QuickSettingsWidget {
     /// Build the widget from `[widgets.quick_settings]`.
     pub fn new(config: &Config, context: &BarContext) -> Self {
         let settings = config.widgets.quick_settings.clone();
+        let appearance = config.appearance.clone();
 
         let shell = WidgetShell::new(classes::QUICK_SETTINGS);
         shell.make_interactive();
@@ -73,10 +74,11 @@ impl QuickSettingsWidget {
         let popover = {
             let services = context.services.clone();
             let settings = settings.clone();
+            let appearance = appearance.clone();
             let monitor = context.monitor.clone();
             let built = Rc::clone(&built);
             popovers::attach(context, WIDGET_NAME, shell.root(), move || {
-                let panel = panel::Panel::new(&services, &settings, &monitor);
+                let panel = panel::Panel::new(&services, &settings, &appearance, &monitor);
                 *built.borrow_mut() = Some(Rc::clone(&panel));
                 panel as Rc<dyn PopoverContent>
             })

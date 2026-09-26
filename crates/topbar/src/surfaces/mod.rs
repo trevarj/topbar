@@ -6,7 +6,9 @@
 #[cfg(debug_assertions)]
 pub mod dump;
 pub mod inline;
+pub mod launcher;
 pub mod layer_popover;
+pub mod modal;
 pub mod osd;
 pub mod osd_bar;
 pub mod popovers;

@@ -188,6 +188,109 @@ pub const DIALOG_BUTTON: &str = "dialog-button";
 /// The one that commits.
 pub const DIALOG_BUTTON_PRIMARY: &str = "dialog-button-primary";
 
+/// The standalone structured chooser's layer-shell window.
+pub const CHOOSER_WINDOW: &str = "chooser-window";
+/// The dimmed surface below a standalone chooser.
+pub const CHOOSER_BACKDROP: &str = "chooser-backdrop";
+/// The chooser's painted dialog surface.
+pub const CHOOSER_DIALOG: &str = "chooser-dialog";
+/// The chooser's heading.
+pub const CHOOSER_TITLE: &str = "chooser-title";
+/// Optional explanatory copy below the heading.
+pub const CHOOSER_MESSAGE: &str = "chooser-message";
+/// The chooser's search field.
+pub const CHOOSER_SEARCH: &str = "chooser-search";
+/// The scrollable result list.
+pub const CHOOSER_RESULTS: &str = "chooser-results";
+/// One candidate row or card.
+pub const CHOOSER_RESULT: &str = "chooser-result";
+/// The candidate under keyboard selection.
+pub const CHOOSER_RESULT_SELECTED: &str = "chooser-result-selected";
+/// The candidate currently applied outside the chooser.
+pub const CHOOSER_RESULT_CURRENT: &str = "chooser-result-current";
+/// Candidate's primary label.
+pub const CHOOSER_LABEL: &str = "chooser-label";
+/// Candidate's secondary label.
+pub const CHOOSER_SUBTITLE: &str = "chooser-subtitle";
+/// Theme polarity label.
+pub const CHOOSER_MODE: &str = "chooser-mode";
+/// Current-item marker.
+pub const CHOOSER_CURRENT: &str = "chooser-current";
+/// Empty filtered-result message.
+pub const CHOOSER_EMPTY: &str = "chooser-empty";
+/// Selected candidate preview area.
+pub const CHOOSER_PREVIEW: &str = "chooser-preview";
+/// Wallpaper image in the selected preview area.
+pub const CHOOSER_PREVIEW_IMAGE: &str = "chooser-preview-image";
+/// Sample built from a selected theme palette.
+pub const CHOOSER_THEME_SAMPLE: &str = "chooser-theme-sample";
+/// Painted theme palette stripes.
+pub const CHOOSER_SWATCH: &str = "chooser-swatch";
+/// Cancel/apply action row.
+pub const CHOOSER_ACTIONS: &str = "chooser-actions";
+
+/// The standalone pinentry layer-shell window.
+pub const PINENTRY_WINDOW: &str = "pinentry-window";
+/// The input-blocking pinentry backdrop.
+pub const PINENTRY_BACKDROP: &str = "pinentry-backdrop";
+/// The painted pinentry dialog.
+pub const PINENTRY_DIALOG: &str = "pinentry-dialog";
+/// Pinentry heading.
+pub const PINENTRY_TITLE: &str = "pinentry-title";
+/// Key or calling-application context.
+pub const PINENTRY_CONTEXT: &str = "pinentry-context";
+/// Plain protocol description.
+pub const PINENTRY_DESCRIPTION: &str = "pinentry-description";
+/// Protocol error text.
+pub const PINENTRY_ERROR: &str = "pinentry-error";
+/// Passphrase entry.
+pub const PINENTRY_ENTRY: &str = "pinentry-entry";
+/// Caps Lock status.
+pub const PINENTRY_CAPS_LOCK: &str = "pinentry-caps-lock";
+/// Pinentry action row.
+pub const PINENTRY_ACTIONS: &str = "pinentry-actions";
+
+/// The full-screen launcher layer-shell window.
+pub const LAUNCHER_WINDOW: &str = "launcher-window";
+/// The painted launcher content.
+pub const LAUNCHER: &str = "launcher";
+/// The launcher backdrop, which niri may render with wallpaper xray blur.
+pub const LAUNCHER_BACKDROP: &str = "launcher-backdrop";
+/// Use the palette scrim once compositor blur is available for the backdrop.
+pub const LAUNCHER_BACKDROP_BLURRED: &str = "launcher-backdrop-blurred";
+/// The launcher query entry.
+pub const LAUNCHER_SEARCH: &str = "launcher-search";
+/// Filter button row.
+pub const LAUNCHER_FILTERS: &str = "launcher-filters";
+/// One launcher filter button.
+pub const LAUNCHER_FILTER: &str = "launcher-filter";
+/// The active launcher filter.
+pub const LAUNCHER_FILTER_SELECTED: &str = "launcher-filter-selected";
+/// Scroller containing launcher sections.
+pub const LAUNCHER_SCROLL: &str = "launcher-scroll";
+/// Launcher results container.
+pub const LAUNCHER_RESULTS: &str = "launcher-results";
+/// Launcher section heading.
+pub const LAUNCHER_SECTION: &str = "launcher-section";
+/// Responsive tile layout.
+pub const LAUNCHER_GRID: &str = "launcher-grid";
+/// Vertical result lists for windows, files, and actions.
+pub const LAUNCHER_LIST: &str = "launcher-list";
+/// One launcher result tile.
+pub const LAUNCHER_ITEM: &str = "launcher-item";
+/// A compact row in a launcher result list.
+pub const LAUNCHER_ROW: &str = "launcher-row";
+/// The keyboard-selected launcher tile.
+pub const LAUNCHER_ITEM_SELECTED: &str = "launcher-item-selected";
+/// Full-colour launcher icon.
+pub const LAUNCHER_ICON: &str = "launcher-icon";
+/// Launcher result title.
+pub const LAUNCHER_ITEM_TITLE: &str = "launcher-item-title";
+/// Launcher result subtitle.
+pub const LAUNCHER_ITEM_SUBTITLE: &str = "launcher-item-subtitle";
+/// Local launcher status or failure text.
+pub const LAUNCHER_STATUS: &str = "launcher-status";
+
 /// The keyboard-layout widget.
 pub const KEYBOARD_LAYOUT: &str = "keyboard-layout";
 /// The keyboard-layout widget's icon.
@@ -698,6 +801,56 @@ pub const ALL: &[&str] = &[
     LOCATION_ACTIONS,
     DIALOG_BUTTON,
     DIALOG_BUTTON_PRIMARY,
+    CHOOSER_WINDOW,
+    CHOOSER_BACKDROP,
+    CHOOSER_DIALOG,
+    CHOOSER_TITLE,
+    CHOOSER_MESSAGE,
+    CHOOSER_SEARCH,
+    CHOOSER_RESULTS,
+    CHOOSER_RESULT,
+    CHOOSER_RESULT_SELECTED,
+    CHOOSER_RESULT_CURRENT,
+    CHOOSER_LABEL,
+    CHOOSER_SUBTITLE,
+    CHOOSER_MODE,
+    CHOOSER_CURRENT,
+    CHOOSER_EMPTY,
+    CHOOSER_PREVIEW,
+    CHOOSER_PREVIEW_IMAGE,
+    CHOOSER_THEME_SAMPLE,
+    CHOOSER_SWATCH,
+    CHOOSER_ACTIONS,
+    PINENTRY_WINDOW,
+    PINENTRY_BACKDROP,
+    PINENTRY_DIALOG,
+    PINENTRY_TITLE,
+    PINENTRY_CONTEXT,
+    PINENTRY_DESCRIPTION,
+    PINENTRY_ERROR,
+    PINENTRY_ENTRY,
+    PINENTRY_CAPS_LOCK,
+    PINENTRY_ACTIONS,
+    LAUNCHER_WINDOW,
+    LAUNCHER,
+    LAUNCHER_BACKDROP,
+    LAUNCHER_BACKDROP_BLURRED,
+    LAUNCHER_SEARCH,
+    LAUNCHER_FILTERS,
+    LAUNCHER_FILTER,
+    LAUNCHER_FILTER_SELECTED,
+    LAUNCHER_SCROLL,
+    LAUNCHER_RESULTS,
+    LAUNCHER_SECTION,
+    LAUNCHER_GRID,
+    LAUNCHER_LIST,
+    LAUNCHER_ITEM,
+    LAUNCHER_ROW,
+    LAUNCHER_ITEM_SELECTED,
+    LAUNCHER_ICON,
+    LAUNCHER_ITEM_TITLE,
+    LAUNCHER_ITEM_SUBTITLE,
+    LAUNCHER_STATUS,
     KEYBOARD_LAYOUT,
     KEYBOARD_LAYOUT_ICON,
     CUSTOM_ICON,

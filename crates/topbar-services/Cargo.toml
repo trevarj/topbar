@@ -58,6 +58,7 @@ required-features = ["fake-nm"]
 [dependencies]
 topbar-core = { workspace = true }
 futures-util = { workspace = true }
+gio = { workspace = true }
 libc = { workspace = true }
 libpulse-binding = { workspace = true }
 minreq = { workspace = true }

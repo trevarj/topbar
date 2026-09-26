@@ -1815,10 +1815,15 @@ dependencies = [
  "chrono-tz",
  "clap",
  "gdk4-wayland",
+ "gio",
  "gtk4",
  "gtk4-layer-shell",
+ "libc",
+ "niri-ipc",
  "notify",
+ "serde",
  "serde_json",
+ "tokio",
  "topbar-core",
  "topbar-services",
  "tracing",
@@ -1843,6 +1848,7 @@ name = "topbar-services"
 version = "2.0.0"
 dependencies = [
  "futures-util",
+ "gio",
  "libc",
  "libpulse-binding",
  "minreq",

@@ -33,13 +33,14 @@
 use std::rc::Rc;
 
 use gtk4::prelude::*;
-use gtk4::{Orientation, PolicyType, ScrolledWindow};
-use topbar_core::config::QuickSettingsConfig;
+use gtk4::{Button, Orientation, PolicyType, ScrolledWindow};
+use topbar_core::config::{AppearanceConfig, QuickSettingsConfig};
 use topbar_services::{NetworkState, Services};
 
-use crate::bridge::{self, BindingGuard};
+use crate::bridge::{self, ActionScope, BindingGuard};
 use crate::style::classes;
 use crate::surfaces::layer_popover;
+use crate::surfaces::popovers;
 use crate::surfaces::popovers::PopoverContent;
 use crate::widgets::expander::{Accordion, Section};
 use crate::widgets::quick_settings::cards::{
@@ -111,6 +112,7 @@ impl Panel {
     pub fn new(
         services: &Services,
         config: &QuickSettingsConfig,
+        appearance: &AppearanceConfig,
         monitor: &gtk4::gdk::Monitor,
     ) -> Rc<Self> {
         let root = gtk4::Box::new(Orientation::Vertical, 0);
@@ -159,6 +161,33 @@ impl Panel {
             config.vpn_close_on_connect,
         );
         content.append(toggles.root());
+
+        let appearance_row = gtk4::Box::new(Orientation::Horizontal, 8);
+        for (label, command) in [
+            ("Theme", appearance.theme_command.as_ref()),
+            ("Wallpaper", appearance.wallpaper_command.as_ref()),
+        ] {
+            let Some(command) = command else { continue };
+            let button = Button::with_label(label);
+            button.add_css_class(classes::DIALOG_BUTTON);
+            button.set_hexpand(true);
+            let argv = command.clone();
+            button.connect_clicked(move |_| {
+                popovers::dispatch(&topbar_core::ipc::PopoverAction::Hide(None), None);
+                let argv = argv.clone();
+                bridge::act(
+                    ActionScope::Toast {
+                        widget: "quick_settings",
+                    },
+                    async move { topbar_services::proc::run_argv(&argv).await },
+                );
+            });
+            appearance_row.append(&button);
+        }
+        if appearance_row.first_child().is_some() {
+            appearance_row.set_margin_top(8);
+            content.append(&appearance_row);
+        }
 
         // Under the grid rather than inside it: a cable is a statement, not a
         // control, and a non-interactive pill sitting among four that respond

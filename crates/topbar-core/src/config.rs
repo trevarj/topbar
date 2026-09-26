@@ -284,6 +284,10 @@ pub struct Config {
     pub audio: AudioConfig,
     /// Update-count service.
     pub updates: UpdatesConfig,
+    /// Application and filename launcher settings.
+    pub launcher: LauncherConfig,
+    /// External commands for the appearance pickers.
+    pub appearance: AppearanceConfig,
     /// Advanced/escape-hatch options.
     pub advanced: AdvancedConfig,
 }
@@ -439,6 +443,18 @@ impl Config {
             UPDATES_KEYS,
             &mut lint,
         );
+        let launcher = parse_plain(
+            "launcher",
+            take_table(&mut root, "launcher", &mut lint),
+            LAUNCHER_KEYS,
+            &mut lint,
+        );
+        let appearance = parse_plain(
+            "appearance",
+            take_table(&mut root, "appearance", &mut lint),
+            APPEARANCE_KEYS,
+            &mut lint,
+        );
         let advanced = parse_plain(
             "advanced",
             take_table(&mut root, "advanced", &mut lint),
@@ -457,6 +473,8 @@ impl Config {
             osd,
             audio,
             updates,
+            launcher,
+            appearance,
             advanced,
         };
 
@@ -577,6 +595,8 @@ impl Config {
         self.theme.validate(lint);
         self.osd.validate(lint);
         self.updates.validate(lint);
+        self.launcher.validate(lint);
+        self.appearance.validate(lint);
         self.advanced.validate(lint);
     }
 
@@ -2143,6 +2163,76 @@ impl UpdatesConfig {
     }
 }
 
+const LAUNCHER_KEYS: &[&str] = &["file_roots", "file_exclusions"];
+
+/// `[launcher]` — filename discovery configuration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LauncherConfig {
+    /// Directories searched for filenames. `~` expands to the user's home.
+    pub file_roots: Vec<PathBuf>,
+    /// Additional directory or file patterns excluded by `fd`.
+    pub file_exclusions: Vec<String>,
+}
+
+impl Default for LauncherConfig {
+    fn default() -> Self {
+        Self {
+            file_roots: vec![PathBuf::from("~")],
+            file_exclusions: Vec::new(),
+        }
+    }
+}
+
+impl LauncherConfig {
+    fn validate(&self, lint: &mut Lint) {
+        if self.file_roots.is_empty() {
+            lint.error("launcher.file_roots: at least one search root is required");
+        }
+        if self
+            .file_roots
+            .iter()
+            .any(|root| root.as_os_str().is_empty())
+        {
+            lint.error("launcher.file_roots: search roots must not be empty");
+        }
+        if self
+            .file_exclusions
+            .iter()
+            .any(|pattern| pattern.is_empty())
+        {
+            lint.error("launcher.file_exclusions: patterns must not be empty");
+        }
+    }
+}
+
+const APPEARANCE_KEYS: &[&str] = &["theme_command", "wallpaper_command"];
+
+/// `[appearance]` — scripts that present and apply desktop appearance choices.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppearanceConfig {
+    /// Program and arguments for the theme picker, unset to hide the action.
+    pub theme_command: Option<Vec<String>>,
+    /// Program and arguments for the wallpaper picker, unset to hide the action.
+    pub wallpaper_command: Option<Vec<String>>,
+}
+
+impl AppearanceConfig {
+    fn validate(&self, lint: &mut Lint) {
+        for (key, command) in [
+            ("appearance.theme_command", &self.theme_command),
+            ("appearance.wallpaper_command", &self.wallpaper_command),
+        ] {
+            if command.as_ref().is_some_and(|argv| {
+                argv.is_empty() || argv.iter().any(|arg| arg.is_empty() || arg.contains('\0'))
+            }) {
+                lint.error(format!("{key}: command arguments must be nonempty strings"));
+            }
+        }
+    }
+}
+
 const ADVANCED_KEYS: &[&str] = &["compositor", "pango_font_rendering"];
 
 /// `[advanced]`
@@ -2248,6 +2338,35 @@ mod tests {
         let (config, warnings) = parse_ok("");
         assert_eq!(config, Config::default());
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn launcher_and_appearance_contract() {
+        let (config, warnings) = parse_ok(
+            "[launcher]\nfile_roots = [\"~/Documents\"]\nfile_exclusions = [\"private\"]\n\
+             [appearance]\ntheme_command = [\"theme-switch\"]\nwallpaper_command = [\"theme-switch\", \"--pick-wallpaper\"]",
+        );
+        assert!(warnings.is_empty());
+        assert_eq!(config.launcher.file_roots, [PathBuf::from("~/Documents")]);
+        assert_eq!(config.launcher.file_exclusions, ["private"]);
+        assert_eq!(
+            config.appearance.theme_command,
+            Some(vec!["theme-switch".into()])
+        );
+        assert_eq!(
+            config.appearance.wallpaper_command.as_ref().unwrap()[1],
+            "--pick-wallpaper"
+        );
+        assert!(
+            errors_of("[launcher]\nfile_roots = []")
+                .iter()
+                .any(|error| error.contains("file_roots"))
+        );
+        assert!(
+            errors_of("[appearance]\ntheme_command = []")
+                .iter()
+                .any(|error| error.contains("theme_command"))
+        );
     }
 
     #[test]

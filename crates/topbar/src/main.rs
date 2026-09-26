@@ -10,11 +10,13 @@ mod anim;
 mod app;
 mod bar;
 mod bridge;
+mod chooser;
 mod cli;
 mod commands;
 mod control;
 mod fonts;
 mod ipc_client;
+mod pinentry;
 mod reload;
 mod style;
 mod surfaces;
@@ -33,6 +35,12 @@ use tracing::{info, warn};
 use crate::cli::Cli;
 
 fn main() -> ExitCode {
+    // `topbar-pinentry` is a separately installed invocation of this binary. It must bypass
+    // clap entirely because gpg-agent is allowed to pass pinentry-specific
+    // flags that are protocol context, not topbar flags.
+    if env!("CARGO_BIN_NAME") == "topbar-pinentry" || invoked_as_pinentry() {
+        return pinentry::run(None);
+    }
     let cli = Cli::parse();
     logging::init(cli.verbose);
 
@@ -110,6 +118,15 @@ fn main() -> ExitCode {
     // bundle is complete before anything can be woken.
     services.wake_on_resume();
     app::run(load.config, cli.config, load.source, services)
+}
+
+/// Whether this binary was reached through the dedicated pinentry entrypoint.
+fn invoked_as_pinentry() -> bool {
+    std::env::args_os().next().is_some_and(|program| {
+        std::path::Path::new(&program)
+            .file_name()
+            .is_some_and(|name| name == "topbar-pinentry")
+    })
 }
 
 /// `--check-config` output: one status line, then every warning on stderr.
@@ -198,6 +215,10 @@ mod tests {
             vec!["topbar", "popover", "show", "clock"],
             vec!["topbar", "popover", "hide"],
             vec!["topbar", "popover", "toggle", "clock"],
+            vec!["topbar", "launcher", "show"],
+            vec!["topbar", "launcher", "hide"],
+            vec!["topbar", "launcher", "toggle"],
+            vec!["topbar", "pinentry"],
             vec!["topbar", "reload"],
             vec!["topbar", "dump", "default-config"],
         ] {

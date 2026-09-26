@@ -22,6 +22,7 @@ use tracing::{info, warn};
 
 use crate::bar::{BarManager, SharedConfig};
 use crate::reload::Reloader;
+use crate::surfaces::launcher;
 use crate::surfaces::osd::{self, OsdEvent};
 use crate::surfaces::popovers;
 use crate::surfaces::toast;
@@ -133,6 +134,20 @@ fn handle(panel: &Panel, envelope: topbar_services::ipc::Envelope) {
                     message: no_popover(&action),
                 });
             }
+        }
+
+        IpcRequest::Launcher { action } => {
+            let visible = launcher::dispatch(action, &panel.services, &panel.config.current());
+            envelope.answer(IpcResponse::Value {
+                text: if visible { "shown" } else { "hidden" }.to_string(),
+            });
+        }
+
+        IpcRequest::DismissTransient => {
+            launcher::dismiss();
+            crate::widgets::weather::dialog::dismiss();
+            popovers::close_all();
+            envelope.answer(IpcResponse::Ok);
         }
 
         IpcRequest::Reload => match panel.reloader.apply() {
@@ -247,6 +262,7 @@ fn snapshot(services: &Services) -> serde_json::Value {
     let weather = weather.borrow();
     let crypto = services.crypto.state();
     let crypto = crypto.borrow();
+    let files = services.files.current();
 
     serde_json::json!({
         "audio": {
@@ -297,6 +313,13 @@ fn snapshot(services: &Services) -> serde_json::Value {
         },
         "crypto": {
             "entries": crypto.entries.len(),
+        },
+        "files": {
+            "discovering": files.discovering,
+            "partial": files.partial,
+            "paths": files.entries.len(),
+            "path_bytes": files.path_bytes,
+            "warning": files.warning,
         },
     })
 }

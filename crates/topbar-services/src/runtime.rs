@@ -12,6 +12,7 @@ use tokio::runtime;
 use topbar_core::Config;
 use tracing::info;
 
+use crate::applications::Applications;
 use crate::audio::Audio;
 use crate::battery::Battery;
 use crate::bluetooth::Bluetooth;
@@ -20,6 +21,7 @@ use crate::compositor::Compositor;
 use crate::connectivity::Connectivity;
 use crate::crypto::Crypto;
 use crate::custom::CustomWidgets;
+use crate::file_search::{FileSearch, FileSearchConfig};
 use crate::headset::Headset;
 use crate::inhibitor::Inhibitor;
 use crate::ipc::Ipc;
@@ -32,7 +34,7 @@ use crate::power::Power;
 use crate::power_profiles::PowerProfiles;
 use crate::privacy::Privacy;
 use crate::resources::Resources;
-use crate::state_store::StateStore;
+use crate::state_store::{LauncherUsage, StateStore};
 use crate::tray::{DEFAULT_ICON_SIZE, Tray};
 use crate::updates::Updates;
 use crate::weather::Weather;
@@ -69,8 +71,14 @@ impl Runtime {
 /// start-up order, so `main` does not change again as milestones land.
 #[derive(Clone)]
 pub struct Services {
+    /// Installed desktop entries, discovered through GIO for launcher search.
+    pub applications: Applications,
     /// The selected compositor service.
     pub compositor: Compositor,
+    /// In-memory filename catalog for launcher search.
+    pub files: FileSearch,
+    /// Frequent application scores backed by the existing state writer.
+    pub launcher_usage: LauncherUsage,
     /// The notification daemon.
     pub notifications: Notifications,
     /// The MPRIS media players.
@@ -232,6 +240,10 @@ impl Services {
     /// [`Self::start_if_needed`], which is why the two live next to each other.
     pub fn start(config: &Config) -> Self {
         let compositor = config.advanced.compositor.clone();
+        let file_search = FileSearchConfig::new(
+            config.launcher.file_roots.clone(),
+            config.launcher.file_exclusions.clone(),
+        );
         let weather = config.widgets.weather.clone();
         let crypto = config.widgets.crypto.clone();
         let custom = config.widgets.custom.clone();
@@ -266,7 +278,10 @@ impl Services {
             let network = Network::start(nm_bus, state.network, Some(store.clone()));
             let connectivity = Connectivity::from_network(&network);
             Self {
+                applications: Applications::start(),
                 compositor: Compositor::start(&compositor),
+                files: FileSearch::start(file_search),
+                launcher_usage: LauncherUsage::new(state.launcher, store.clone()),
                 notifications: Notifications::start(state.notifications, store.clone(), None),
                 media: Media::start(None, demand.media),
                 weather: Weather::start(
@@ -332,6 +347,7 @@ impl Services {
         // The compositor stream first: everything else is a number on the panel,
         // this one is whether the panel is showing this session at all.
         self.compositor.health_check();
+        self.files.handle().resumed().await.ok();
         // The CPU delta spans the sleep and is meaningless; the next reading
         // has to start a fresh pair rather than report a spike.
         self.resources.handle().discard_stale_sample().await;

@@ -85,6 +85,9 @@
 #                         agent there. A debug build with no
 #                         TOPBAR_SMOKE_BLUEZ_BUS refuses all three by
 #                         construction — see `network::Access`.
+#   TOPBAR_SMOKE_PINENTRY build the dedicated `topbar-pinentry` binary. The
+#                         normal panel smoke only needs `topbar`; the
+#                         standalone pinentry scenario opts in explicitly.
 #   SMOKE_PATH            a directory prepended to $PATH inside the session,
 #                         for the fake package managers the updates scenarios
 #                         run. Nothing else on the machine is on that PATH
@@ -99,6 +102,11 @@
 #                         run can begin from state a previous session
 #                         remembered — a saved weather location, say. The copy
 #                         lands inside the sandbox and nowhere else.
+#   TOPBAR_SMOKE_DATA     a directory copied into the sandboxed
+#                         $XDG_DATA_HOME before the panel starts. Launcher
+#                         scenarios use this for deterministic desktop-entry
+#                         fixtures; the real per-user application directory is
+#                         never read or modified by a smoke run.
 #   TOPBAR_SMOKE_PULSE    start a PulseAudio of the run's own, with a null
 #                         sink, inside the sandbox, and point the panel and the
 #                         CLI at it through $PULSE_SERVER. The developer's real
@@ -146,7 +154,19 @@ trap 'rm -rf "$xdg_box"' EXIT INT TERM
 export XDG_STATE_HOME="$xdg_box/state"
 export XDG_CACHE_HOME="$xdg_box/cache"
 export XDG_CONFIG_HOME="$xdg_box/config"
-mkdir -p "$XDG_STATE_HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME/niri"
+export XDG_DATA_HOME="$xdg_box/data"
+mkdir -p "$XDG_STATE_HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME/niri" "$XDG_DATA_HOME"
+
+# GIO discovers desktop entries through XDG_DATA_HOME.  Copy an explicit
+# fixture tree when a launcher scenario supplies one, so it cannot pick up a
+# developer's personal entries or write beside them.
+if [ -n "${TOPBAR_SMOKE_DATA:-}" ]; then
+  if [ ! -d "$TOPBAR_SMOKE_DATA" ]; then
+    echo "TOPBAR_SMOKE_DATA is not a directory: $TOPBAR_SMOKE_DATA" >&2
+    exit 1
+  fi
+  cp -a "$TOPBAR_SMOKE_DATA"/. "$XDG_DATA_HOME"/
+fi
 
 # The runtime directory is boxed too, so the panel's single-instance lock and
 # its IPC socket land inside the run and nowhere near a real panel's. The host
@@ -255,6 +275,10 @@ done
 
 cargo build -p topbar
 
+if [ -n "${TOPBAR_SMOKE_PINENTRY:-}" ]; then
+  cargo build -p topbar --bin topbar-pinentry
+fi
+
 player_abs=""
 if [ -n "${TOPBAR_SMOKE_PLAYERS:-}" ]; then
   cargo build -p topbar-services --features fake-player --bin topbar-fake-player
@@ -302,6 +326,12 @@ export SMOKE_FAKE_PLAYER="$5"
 export SMOKE_FAKE_SNI="$6"
 export SMOKE_TOPBAR="$1"
 export SMOKE_CONFIG="$2"
+printf "NIRI_SOCKET=%s\nWAYLAND_DISPLAY=%s\n" "${NIRI_SOCKET:-}" "${WAYLAND_DISPLAY:-}" \
+  >"$3/niri-environment.txt"
+if [ -z "${NIRI_SOCKET:-}" ] || [ ! -S "$NIRI_SOCKET" ]; then
+  echo "nested niri did not provide a live IPC socket" >&2
+  exit 1
+fi
 export SMOKE_FAKE_NM="${10}"
 export SMOKE_FAKE_BLUEZ="${12}"
 

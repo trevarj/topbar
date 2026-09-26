@@ -12,7 +12,9 @@
 //! of notifications costs one write and a crash mid-write leaves the previous
 //! state intact rather than a truncated file.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -49,6 +51,129 @@ pub struct PersistedState {
     pub crypto: PersistedCrypto,
     /// The VPN profile that was last actually up.
     pub network: PersistedNetwork,
+    /// Only application identities and their launcher use scores.
+    pub launcher: PersistedLauncher,
+}
+
+/// Successful launcher activations, keyed by desktop entry ID.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PersistedLauncher {
+    /// Usage records; queries, paths, and window titles are never persisted.
+    pub applications: BTreeMap<String, UsageRecord>,
+}
+
+/// One application's usage count and exponentially decaying score.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UsageRecord {
+    /// Successful app launches and unambiguous window activations.
+    pub count: u64,
+    /// Unix timestamp of the last successful use, in seconds.
+    pub last_use: i64,
+    /// Score evaluated at `last_use`.
+    pub score: f64,
+}
+
+/// Thirty days, measured in seconds.
+const USAGE_HALF_LIFE: f64 = 30.0 * 24.0 * 60.0 * 60.0;
+
+impl UsageRecord {
+    /// Score after decay to `now`, even for records with malformed timestamps.
+    pub fn score_at(&self, now: i64) -> f64 {
+        let age = now.saturating_sub(self.last_use).max(0) as f64;
+        if self.score.is_finite() && self.score >= 0.0 {
+            self.score * 2.0_f64.powf(-age / USAGE_HALF_LIFE)
+        } else {
+            0.0
+        }
+    }
+
+    /// Count a successful activation at `now`.
+    pub fn record(&mut self, now: i64) {
+        self.score = self.score_at(now) + 1.0;
+        self.count = self.count.saturating_add(1);
+        self.last_use = now;
+    }
+}
+
+impl PersistedLauncher {
+    /// Count one successful activation of an installed application.
+    pub fn record(&mut self, desktop_id: &str, now: i64) {
+        self.applications
+            .entry(desktop_id.to_owned())
+            .or_default()
+            .record(now);
+    }
+
+    /// Up to six installed applications, highest decayed score first.
+    pub fn frequent<'a>(
+        &self,
+        installed: impl IntoIterator<Item = &'a str>,
+        now: i64,
+    ) -> Vec<String> {
+        let mut matches: Vec<_> = installed
+            .into_iter()
+            .filter_map(|id| {
+                let usage = self.applications.get(id)?;
+                (usage.count > 0).then_some((id, usage))
+            })
+            .collect();
+        matches.sort_by(|(left_id, left), (right_id, right)| {
+            right
+                .score_at(now)
+                .total_cmp(&left.score_at(now))
+                .then_with(|| right.last_use.cmp(&left.last_use))
+                .then_with(|| left_id.cmp(right_id))
+        });
+        matches
+            .into_iter()
+            .take(6)
+            .map(|(id, _)| id.to_owned())
+            .collect()
+    }
+}
+
+/// Live launcher usage cache, mirrored into the existing debounced state writer.
+#[derive(Clone)]
+pub struct LauncherUsage {
+    state: Arc<Mutex<PersistedLauncher>>,
+    store: StateStore,
+}
+
+impl LauncherUsage {
+    /// Restore use scores from the panel's state document.
+    pub fn new(state: PersistedLauncher, store: StateStore) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(state)),
+            store,
+        }
+    }
+
+    /// Record a successful activation of an unambiguous desktop ID.
+    pub fn record(&self, desktop_id: &str, now: i64) {
+        if desktop_id.is_empty() {
+            return;
+        }
+        if let Ok(mut state) = self.state.lock() {
+            state.record(desktop_id, now);
+        }
+        let id = desktop_id.to_owned();
+        self.store
+            .update(move |state| state.launcher.record(&id, now));
+    }
+
+    /// Return frequent IDs among the currently installed applications.
+    pub fn frequent<'a>(
+        &self,
+        installed: impl IntoIterator<Item = &'a str>,
+        now: i64,
+    ) -> Vec<String> {
+        self.state
+            .lock()
+            .map(|state| state.frequent(installed, now))
+            .unwrap_or_default()
+    }
 }
 
 /// One queued change to the state document.
@@ -228,6 +353,29 @@ fn write(path: &Path, state: &PersistedState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launcher_usage_decays_and_breaks_ties_by_last_use_then_id() {
+        let mut usage = PersistedLauncher::default();
+        let now = 1_800_000_000;
+        usage.record("old.desktop", now - 30 * 24 * 60 * 60);
+        usage.record("old.desktop", now - 30 * 24 * 60 * 60);
+        usage.record("new.desktop", now);
+        assert_eq!(usage.applications["old.desktop"].count, 2);
+        assert!((usage.applications["old.desktop"].score_at(now) - 1.0).abs() < 1e-9);
+        assert_eq!(
+            usage.frequent(["old.desktop", "new.desktop"], now),
+            vec!["new.desktop", "old.desktop"]
+        );
+
+        usage.record("b.desktop", now);
+        usage.record("a.desktop", now);
+        assert_eq!(
+            usage.frequent(["b.desktop", "a.desktop"], now),
+            vec!["a.desktop", "b.desktop"]
+        );
+        assert!(usage.frequent(["missing.desktop"], now).is_empty());
+    }
     use crate::notifications::PersistedNotification;
 
     /// A unique state-file path for one test.

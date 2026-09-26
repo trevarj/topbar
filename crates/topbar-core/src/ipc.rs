@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Wire protocol version. Bump on any incompatible change to the enums below.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Socket file name inside `$XDG_RUNTIME_DIR`.
 pub const SOCKET_NAME: &str = "topbar.sock";
@@ -57,6 +57,13 @@ pub enum IpcRequest {
         /// Requested popover change.
         action: PopoverAction,
     },
+    /// Control the panel's full-screen launcher.
+    Launcher {
+        /// Requested visibility change.
+        action: VisibilityAction,
+    },
+    /// Dismiss any panel-owned transient input surface before a standalone dialog opens.
+    DismissTransient,
     /// Control media playback through the panel's MPRIS service.
     Media {
         /// Requested playback change.
@@ -225,6 +232,20 @@ mod tests {
         let (decoded, consumed) = decode_frame::<IpcRequest>(&frame).unwrap();
         assert_eq!(decoded, request);
         assert_eq!(consumed, frame.len());
+    }
+
+    #[test]
+    fn round_trips_launcher_and_dismissal() {
+        for request in [
+            IpcRequest::Launcher {
+                action: VisibilityAction::Toggle,
+            },
+            IpcRequest::DismissTransient,
+        ] {
+            let frame = encode_frame(&request).unwrap();
+            let (decoded, _) = decode_frame::<IpcRequest>(&frame).unwrap();
+            assert_eq!(decoded, request);
+        }
     }
 
     #[test]

@@ -60,6 +60,10 @@ pub struct ConfigDelta {
     pub audio: bool,
     /// `[updates]` changed.
     pub updates: bool,
+    /// `[launcher]` changed.
+    pub launcher: bool,
+    /// `[appearance]` changed.
+    pub appearance: bool,
     /// `[advanced]` changed.
     pub advanced: bool,
 }
@@ -131,6 +135,11 @@ impl ConfigDelta {
         delta.osd |= before.accent != after.accent || before.urgent != after.urgent;
         delta.audio = old.audio != new.audio;
         delta.updates = old.updates != new.updates;
+        delta.launcher = old.launcher != new.launcher;
+        delta.appearance = old.appearance != new.appearance;
+        if delta.appearance {
+            delta.widgets.insert("quick_settings".into());
+        }
         delta.advanced = old.advanced != new.advanced;
 
         delta
@@ -163,6 +172,8 @@ impl ConfigDelta {
             && !self.osd
             && !self.audio
             && !self.updates
+            && !self.launcher
+            && !self.appearance
     }
 }
 
@@ -182,6 +193,8 @@ impl fmt::Display for ConfigDelta {
             (self.osd, "osd"),
             (self.audio, "audio"),
             (self.updates, "updates"),
+            (self.launcher, "launcher"),
+            (self.appearance, "appearance"),
             (self.advanced, "advanced"),
         ] {
             if flag {
@@ -484,6 +497,14 @@ mod tests {
         updates.updates.check_interval = 7200;
         assert!(ConfigDelta::between(&base, &updates).updates);
 
+        let mut launcher = base.clone();
+        launcher.launcher.file_exclusions.push("private".into());
+        assert!(ConfigDelta::between(&base, &launcher).launcher);
+
+        let mut appearance = base.clone();
+        appearance.appearance.theme_command = Some(vec!["theme-switch".into()]);
+        assert!(ConfigDelta::between(&base, &appearance).appearance);
+
         let mut advanced = base.clone();
         advanced.advanced.pango_font_rendering = false;
         let delta = ConfigDelta::between(&base, &advanced);
@@ -516,6 +537,12 @@ mod tests {
         each("osd", |c| c.osd.enabled = false);
         each("audio", |c| c.audio.allow_overdrive = true);
         each("updates", |c| c.updates.check_interval = 120);
+        each("launcher", |c| {
+            c.launcher.file_exclusions.push("private".into())
+        });
+        each("appearance", |c| {
+            c.appearance.theme_command = Some(vec!["theme-switch".into()])
+        });
         each("advanced", |c| c.advanced.compositor = "niri".to_string());
 
         for (name, config) in cases {

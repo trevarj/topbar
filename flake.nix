@@ -93,6 +93,12 @@
           preFixup = ''
             gappsWrapperArgs+=(
               --prefix XDG_DATA_DIRS : "${pkgs.adwaita-icon-theme}/share:${pkgs.hicolor-icon-theme}/share"
+              --prefix PATH : "${
+                lib.makeBinPath [
+                  pkgs.fd
+                  pkgs.xdg-terminal-exec
+                ]
+              }"
             )
           '';
           meta = {
@@ -173,6 +179,8 @@
         inputsFrom = [ topbar ];
         packages = with pkgs; [
           rust-analyzer
+          fd
+          xdg-terminal-exec
           niri
           grim
           headsetcontrol
@@ -188,6 +196,10 @@
           # happened to be on the developer's PATH.
           imagemagick
           python3
+          # The launcher smoke registers a small Gio.Application on the
+          # dbus-run-session bus, proving a DBusActivatable desktop entry
+          # through GIO without ever consulting the developer's session bus.
+          python3Packages.pygobject3
           # `pulseaudio` and `pactl`, for the OSD smoke run. It starts a
           # sound server of its *own* inside the sandbox, with a null sink and
           # a PULSE_RUNTIME_PATH under the run's XDG box, and points both the

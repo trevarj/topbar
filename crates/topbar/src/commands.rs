@@ -55,6 +55,16 @@ pub fn run(command: Command, config_path: Option<&Path>) -> ExitCode {
         Command::Popover { action } => through_panel(&IpcRequest::Popover {
             action: popover(action),
         }),
+        Command::Launcher { action } => through_panel(&IpcRequest::Launcher {
+            action: visibility(action),
+        }),
+        Command::Choose {
+            layout,
+            title,
+            message,
+            selected,
+        } => crate::chooser::run(layout, title, message, selected, config_path),
+        Command::Pinentry => crate::pinentry::run(config_path),
         Command::Reload => through_panel(&IpcRequest::Reload),
         Command::Dump { action, json } => dump(action, json),
     }

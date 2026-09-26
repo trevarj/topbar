@@ -16,7 +16,7 @@ mod rounded_picture;
 mod shell;
 mod system_monitor;
 mod tray;
-mod weather;
+pub(crate) mod weather;
 mod workspaces;
 
 use std::any::Any;

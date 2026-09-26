@@ -353,6 +353,18 @@ impl Reloader {
             let settings = config.updates.clone();
             Runtime::handle().spawn(async move { updates.configure(&settings).await });
         }
+        if delta.launcher {
+            let handle = services.files.handle();
+            let settings = topbar_services::FileSearchConfig::new(
+                config.launcher.file_roots.clone(),
+                config.launcher.file_exclusions.clone(),
+            );
+            Runtime::handle().spawn(async move {
+                if let Err(error) = handle.configure(settings).await {
+                    warn!("filename catalog reconfiguration failed: {error}");
+                }
+            });
+        }
         if delta.audio && previous.audio.allow_overdrive != config.audio.allow_overdrive {
             let handle = services.audio.handle().clone();
             let allow = config.audio.allow_overdrive;

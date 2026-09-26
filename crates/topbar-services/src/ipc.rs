@@ -86,6 +86,64 @@ pub struct InstanceLock {
     path: PathBuf,
 }
 
+/// Advisory ownership of keyboard input across panel and standalone dialogs.
+///
+/// A process may hold this while one modal has keyboard focus. Dropping it or
+/// exiting releases the kernel lock; the file is deliberately never unlinked.
+#[derive(Debug)]
+pub struct InputLock {
+    _file: std::fs::File,
+}
+
+impl InputLock {
+    /// Attempt to claim keyboard input without waiting.
+    pub fn try_acquire() -> Result<Option<Self>, LockError> {
+        let dir = runtime_dir().ok_or(LockError::NoRuntimeDir)?;
+        Self::try_acquire_in(&dir)
+    }
+
+    /// Attempt to claim keyboard input in a chosen runtime directory.
+    pub fn try_acquire_in(dir: &Path) -> Result<Option<Self>, LockError> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(dir.join("topbar-input.lock"))?;
+        // SAFETY: `file` owns a live descriptor for the duration of the call.
+        let taken = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if taken == 0 {
+            return Ok(Some(Self { _file: file }));
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
+            Ok(None)
+        } else {
+            Err(LockError::Io(error))
+        }
+    }
+
+    /// Wait for the current modal to release input, on a blocking worker.
+    pub async fn acquire() -> Result<Self, LockError> {
+        tokio::task::spawn_blocking(|| {
+            let dir = runtime_dir().ok_or(LockError::NoRuntimeDir)?;
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(dir.join("topbar-input.lock"))?;
+            // SAFETY: `file` owns a live descriptor until this task returns.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+                return Err(LockError::Io(std::io::Error::last_os_error()));
+            }
+            Ok(Self { _file: file })
+        })
+        .await
+        .map_err(|error| LockError::Io(std::io::Error::other(error)))?
+    }
+}
+
 impl InstanceLock {
     /// Take the lock in `$XDG_RUNTIME_DIR`.
     pub fn acquire() -> Result<Self, LockError> {
@@ -337,6 +395,17 @@ mod tests {
         // Freed: the same process can take it again.
         let _again = InstanceLock::acquire_in(&dir).expect("the lock came back");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn modal_input_lock_is_nonblocking_and_released_on_drop() {
+        let dir = scratch("input-lock");
+        let first = InputLock::try_acquire_in(&dir)
+            .unwrap()
+            .expect("first modal owns input");
+        assert!(InputLock::try_acquire_in(&dir).unwrap().is_none());
+        drop(first);
+        assert!(InputLock::try_acquire_in(&dir).unwrap().is_some());
     }
 
     #[test]

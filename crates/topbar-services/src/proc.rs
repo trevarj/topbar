@@ -246,10 +246,21 @@ pub async fn run(command: &str) -> Result<(), SvcError> {
         });
     }
 
-    debug!("running `{command}`");
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg(command)
+    run_argv(&["sh".to_string(), "-c".to_string(), command.to_string()]).await
+}
+
+/// Start an argument vector without a shell, and reap the process on exit.
+pub async fn run_argv(argv: &[String]) -> Result<(), SvcError> {
+    let Some((program, arguments)) = argv.split_first() else {
+        return Err(SvcError::Command {
+            command: String::new(),
+            reason: "the command is empty".to_string(),
+        });
+    };
+    let name = program.clone();
+    debug!("starting `{name}`");
+    let mut child = Command::new(program)
+        .args(arguments)
         // No stdin: a command that asks a question the user cannot see would
         // hang for ever holding a reaper task open.
         .stdin(Stdio::null())
@@ -257,7 +268,7 @@ pub async fn run(command: &str) -> Result<(), SvcError> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| SvcError::Command {
-            command: command.to_string(),
+            command: name.clone(),
             reason: error.to_string(),
         })?;
 
@@ -267,20 +278,19 @@ pub async fn run(command: &str) -> Result<(), SvcError> {
         Ok(Ok(status)) if !status.success() => {
             let detail = stderr(&mut child).await;
             Err(SvcError::Command {
-                command: command.to_string(),
+                command: name.clone(),
                 reason: describe(status.code(), &detail),
             })
         }
         // It finished, successfully, before the grace period was up.
         Ok(Ok(_)) => Ok(()),
         Ok(Err(error)) => Err(SvcError::Command {
-            command: command.to_string(),
+            command: name.clone(),
             reason: error.to_string(),
         }),
         // Still running, which is the normal case: hand it to a reaper and
         // stop caring.
         Err(_) => {
-            let name = command.to_string();
             tokio::spawn(async move {
                 match child.wait().await {
                     Ok(status) if !status.success() => {
@@ -431,6 +441,19 @@ mod tests {
             .await
             .expect_err("there is no such program");
         assert!(matches!(error, SvcError::Command { .. }));
+    }
+
+    #[tokio::test]
+    async fn direct_launch_preserves_argument_boundaries() {
+        let result = run_argv(&[
+            "sh".into(),
+            "-c".into(),
+            "test \"$1\" = 'two words'".into(),
+            "sh".into(),
+            "two words".into(),
+        ])
+        .await;
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[tokio::test]

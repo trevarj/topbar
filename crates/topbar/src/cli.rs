@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 /// topbar - GNOME Shell-inspired GTK4 top bar for niri
 #[derive(Debug, Parser)]
@@ -76,6 +76,29 @@ pub enum Command {
         #[command(subcommand)]
         action: PopoverAction,
     },
+    /// Control the application, window, and file launcher
+    Launcher {
+        /// Launcher visibility operation
+        #[command(subcommand)]
+        action: VisibilityAction,
+    },
+    /// Choose one structured item from standard input
+    Choose {
+        /// Picker layout
+        #[arg(long, value_enum, default_value_t = ChooseLayout::List)]
+        layout: ChooseLayout,
+        /// Dialog heading
+        #[arg(long)]
+        title: String,
+        /// Optional explanation shown under the heading
+        #[arg(long)]
+        message: Option<String>,
+        /// ID of the currently applied item
+        #[arg(long)]
+        selected: Option<String>,
+    },
+    /// Serve the GnuPG pinentry protocol on standard input and output.
+    Pinentry,
     /// Re-read the configuration and apply what changed
     Reload,
     /// Dump panel state or built-in defaults
@@ -92,6 +115,17 @@ pub enum Command {
         #[arg(long, global = true)]
         json: bool,
     },
+}
+
+/// Structured chooser presentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ChooseLayout {
+    /// Compact textual rows.
+    List,
+    /// Theme palette cards.
+    Themes,
+    /// Wallpaper image cards.
+    Wallpapers,
 }
 
 /// Brightness operations.

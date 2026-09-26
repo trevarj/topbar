@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::error;
 
-use crate::compositor::{KeyboardLayoutSnapshot, WorkspacesSnapshot};
+use crate::compositor::{KeyboardLayoutSnapshot, WindowsSnapshot, WorkspacesSnapshot};
 pub use requests::NiriHandle;
 
 /// Everything the panel needs from niri.
@@ -22,6 +22,7 @@ pub struct Niri {
     handle: NiriHandle,
     workspaces: watch::Receiver<Arc<WorkspacesSnapshot>>,
     keyboard_layout: watch::Receiver<Arc<KeyboardLayoutSnapshot>>,
+    windows: watch::Receiver<Arc<WindowsSnapshot>>,
     /// Asks the stream task to start a fresh connection. See
     /// [`Niri::health_check`].
     kicks: tokio::sync::mpsc::Sender<()>,
@@ -38,6 +39,7 @@ impl Niri {
         let (workspaces_tx, workspaces) = watch::channel(Arc::new(WorkspacesSnapshot::default()));
         let (keyboard_tx, keyboard_layout) =
             watch::channel(Arc::new(KeyboardLayoutSnapshot::default()));
+        let (windows_tx, windows) = watch::channel(Arc::new(WindowsSnapshot::default()));
 
         let (kicks, kick_queue) = tokio::sync::mpsc::channel(1);
         match socket.clone() {
@@ -47,6 +49,7 @@ impl Niri {
                     stream::Publishers {
                         workspaces: workspaces_tx,
                         keyboard_layout: keyboard_tx,
+                        windows: windows_tx,
                     },
                     kick_queue,
                 ));
@@ -60,6 +63,7 @@ impl Niri {
             handle: NiriHandle::new(socket),
             workspaces,
             keyboard_layout,
+            windows,
             kicks,
         }
     }
@@ -90,6 +94,11 @@ impl Niri {
     /// Subscribe to keyboard-layout state.
     pub fn keyboard_layout(&self) -> watch::Receiver<Arc<KeyboardLayoutSnapshot>> {
         self.keyboard_layout.clone()
+    }
+
+    /// Subscribe to the window projection.
+    pub fn windows(&self) -> watch::Receiver<Arc<WindowsSnapshot>> {
+        self.windows.clone()
     }
 }
 

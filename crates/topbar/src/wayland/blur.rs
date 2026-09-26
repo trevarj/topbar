@@ -761,6 +761,14 @@ impl BlurAttachment {
         Self { inner: None }
     }
 
+    /// Whether this attachment's compositor currently advertises blur.
+    /// Callers that need translucency can keep an opaque fallback otherwise.
+    pub fn is_available(&self) -> bool {
+        self.inner
+            .as_ref()
+            .is_some_and(|attached| attached.manager.capable())
+    }
+
     /// Remove the region now, and keep it off until the surface maps again.
     ///
     /// Call this the moment a fade-out *starts*. The compositor blurs what is
@@ -1054,6 +1062,7 @@ mod tests {
         // Every consumer holds one of these when blur is off, and calls the
         // same methods on it; none of them may touch a manager that is absent.
         let guard = BlurAttachment::inert();
+        assert!(!guard.is_available());
         guard.suspend();
         guard.resume();
         guard.set_scale(0.5);

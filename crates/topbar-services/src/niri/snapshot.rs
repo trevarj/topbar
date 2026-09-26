@@ -13,7 +13,43 @@ use std::collections::{BTreeMap, HashSet};
 
 use niri_ipc::state::EventStreamState;
 
-use crate::compositor::{KeyboardLayoutSnapshot, WorkspaceView, WorkspacesSnapshot};
+use crate::compositor::{
+    KeyboardLayoutSnapshot, WindowView, WindowsSnapshot, WorkspaceView, WorkspacesSnapshot,
+};
+
+/// Project the window map with workspace and output context.
+pub(crate) fn windows(state: &EventStreamState, connected: bool) -> WindowsSnapshot {
+    let mut windows: Vec<_> = state
+        .windows
+        .windows
+        .values()
+        .map(|window| {
+            let workspace = window
+                .workspace_id
+                .and_then(|id| state.workspaces.workspaces.get(&id));
+            WindowView {
+                id: window.id,
+                title: window.title.clone().unwrap_or_default(),
+                app_id: window.app_id.clone().unwrap_or_default(),
+                workspace: workspace.map(|workspace| {
+                    workspace
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| workspace.idx.to_string())
+                }),
+                output: workspace.and_then(|workspace| workspace.output.clone()),
+                focused_at_ms: window
+                    .focus_timestamp
+                    .map(|time| std::time::Duration::from(time).as_millis()),
+            }
+        })
+        .collect();
+    windows.sort_by_key(|window| window.id);
+    WindowsSnapshot {
+        connected,
+        windows: if connected { windows } else { Vec::new() },
+    }
+}
 
 /// Project the workspace half of `state`.
 ///

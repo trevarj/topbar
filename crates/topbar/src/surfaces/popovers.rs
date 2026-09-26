@@ -98,6 +98,9 @@ impl Entry {
     }
 
     fn open(&self) {
+        if !crate::surfaces::modal::input_available() {
+            return;
+        }
         self.host.open(self.anchored());
     }
 
@@ -108,6 +111,9 @@ impl Entry {
     }
 
     fn toggle(&self) {
+        if !self.host.is_open(&self.name) && !crate::surfaces::modal::input_available() {
+            return;
+        }
         self.host.toggle(self.anchored());
     }
 }

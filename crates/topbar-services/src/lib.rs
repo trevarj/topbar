@@ -9,6 +9,7 @@
 
 #![warn(missing_docs)]
 
+pub mod applications;
 pub mod audio;
 pub mod battery;
 pub mod bluetooth;
@@ -19,6 +20,7 @@ pub mod connectivity;
 pub mod crypto;
 pub mod custom;
 pub mod error;
+pub mod file_search;
 pub mod headset;
 pub mod inhibitor;
 pub mod ipc;
@@ -68,6 +70,7 @@ pub use tokio::sync::watch;
 /// is what makes them safe to await on the GTK main context.
 pub use tokio::sync::{mpsc, oneshot};
 
+pub use applications::{Application, Applications, ApplicationsState};
 pub use audio::{Audio, AudioHandle, AudioState, DeviceView};
 pub use battery::{Battery, BatteryHandle, BatteryState, BatteryStatus, Thresholds};
 pub use bluetooth::{
@@ -76,13 +79,17 @@ pub use bluetooth::{
 pub use brightness::{Brightness, BrightnessHandle, BrightnessState};
 pub use change::{Change, ChangeSource};
 pub use compositor::{
-    Compositor, CompositorHandle, KeyboardLayoutSnapshot, WorkspaceId, WorkspaceView,
-    WorkspacesSnapshot,
+    Compositor, CompositorHandle, KeyboardLayoutSnapshot, WindowView, WindowsSnapshot, WorkspaceId,
+    WorkspaceView, WorkspacesSnapshot,
 };
 pub use connectivity::{Connectivity, ConnectivityState};
 pub use crypto::{Asset, Crypto, CryptoHandle, CryptoState, Entry, EntryQuote, Quote};
 pub use custom::{CustomClass, CustomDisplay, CustomExec, CustomState, CustomWidgets};
 pub use error::SvcError;
+pub use file_search::{
+    FileEntry, FileMatch, FileSearch, FileSearchConfig, FileSearchHandle, FileSearchState, Match,
+    rank, rank_match,
+};
 pub use headset::{Headset, HeadsetReading, HeadsetState};
 pub use inhibitor::{Inhibitor, InhibitorHandle, InhibitorState};
 pub use media::{ArtRef, Media, MediaHandle, MediaState, PlaybackStatus, PlayerView};
@@ -101,7 +108,7 @@ pub use power_profiles::{PowerProfiles, PowerProfilesHandle, PowerProfilesState,
 pub use privacy::{Privacy, PrivacyState};
 pub use resources::{Disk, Memory, ResourceState, Resources, ResourcesHandle};
 pub use runtime::{Runtime, Services};
-pub use state_store::StateStore;
+pub use state_store::{LauncherUsage, StateStore};
 pub use tray::{
     IconView, ItemView, MenuEvent, MenuKind, MenuNode, Pixmap, ScrollAxis, Status as TrayStatus,
     ToggleKind, ToggleState, Tray, TrayHandle, TrayState,

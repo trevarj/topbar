@@ -22,6 +22,8 @@ use topbar_core::theme::{Palette, Rgb};
 const SURFACE_OPACITY: f64 = 0.92;
 /// Alpha of the hairline border every elevated surface carries.
 const SURFACE_BORDER_ALPHA: f64 = 0.08;
+/// Leave some wallpaper visible without letting it compete with launcher text.
+const LAUNCHER_SCRIM_OPACITY: f64 = 0.78;
 
 /// Corner radius of a popover surface, in pixels.
 ///
@@ -73,6 +75,16 @@ pub fn widget_height(bar_size: u32) -> u32 {
 /// Body font size for the bar, derived from the widget height.
 pub fn font_size(bar_size: u32) -> u32 {
     round_to_even((f64::from(widget_height(bar_size)) * FONT_SCALE) as u32)
+}
+
+/// Launcher text stays readable when the panel itself uses a compact height.
+pub fn launcher_font_size(bar_size: u32) -> u32 {
+    font_size(bar_size).max(20)
+}
+
+/// Standalone dialogs need a readable body size even with a compact panel.
+pub fn dialog_font_size(bar_size: u32) -> u32 {
+    font_size(bar_size).max(16)
 }
 
 /// Total height the bar window occupies, including `bar.padding`.
@@ -152,16 +164,23 @@ fn root_block(config: &Config) -> String {
     /* Typography */
     --font-family: {font_family};
     --font-size: {font_size}px;
+    --dialog-font-size: {dialog_font_size}px;
+    --launcher-font-size: {launcher_font_size}px;
     --icon-size: {icon_size}px;
 
     /* Surfaces */
     --color-bar-background: {bar_background};
     --color-widget-background: {widget_background};
     --color-surface: {surface};
+    --color-dialog-surface: {dialog_surface};
     --color-surface-border: {surface_border};
     --color-popover: {popover};
     --color-popover-shadow: {popover_shadow};
+    --shadow-popover: 0 1px 4px var(--color-popover-shadow);
+    --shadow-modal: 0 4px 14px var(--color-popover-shadow);
     --color-card: {card};
+    --color-launcher-backdrop: {launcher_backdrop};
+    --color-launcher-scrim: {launcher_scrim};
 
     /* Panel-button states */
     --color-widget-hover: {hover};
@@ -197,10 +216,13 @@ fn root_block(config: &Config) -> String {
         osd_padding = OSD_PADDING,
         font_family = theme.typography.font_family,
         font_size = font_size(bar.size),
+        dialog_font_size = dialog_font_size(bar.size),
+        launcher_font_size = launcher_font_size(bar.size),
         icon_size = round_to_even((f64::from(bar.size) * ICON_SCALE) as u32),
         bar_background = tinted(palette.bar, bar.background_opacity),
         widget_background = tinted(palette.widget, widgets.background_opacity),
         surface = palette.surface.to_rgba(SURFACE_OPACITY),
+        dialog_surface = palette.surface.to_hex(),
         surface_border = palette.foreground.to_rgba(SURFACE_BORDER_ALPHA),
         // A popover with no opacity of its own follows the bar: an opaque
         // panel means opaque menus, which is what a user who turned
@@ -211,8 +233,10 @@ fn root_block(config: &Config) -> String {
                 .popover_background_opacity
                 .unwrap_or(bar.background_opacity)
         ),
-        popover_shadow = Rgb::new(0, 0, 0).to_rgba(0.5),
+        popover_shadow = Rgb::new(0, 0, 0).to_rgba(0.28),
         card = palette.foreground.to_rgba(0.06),
+        launcher_backdrop = palette.background.to_hex(),
+        launcher_scrim = palette.background.to_rgba(LAUNCHER_SCRIM_OPACITY),
         hover = palette.foreground.to_rgba(0.1),
         pressed = palette.foreground.to_rgba(0.15),
         checked = palette.foreground.to_rgba(0.18),
@@ -457,6 +481,9 @@ window.click-catcher-window,
    rounded popup inside it. Leave only each popup's own CSS shadow. */
 window.popover-window,
 window.location-window,
+window.launcher-window,
+window.chooser-window,
+window.pinentry-window,
 window.toast-window,
 window.osd-window {
     box-shadow: none;
@@ -485,7 +512,7 @@ window.osd-window {
     background-color: var(--color-popover);
     border: 1px solid var(--color-surface-border);
     border-radius: var(--radius-popover);
-    box-shadow: 0 2px 6px var(--color-popover-shadow);
+    box-shadow: var(--shadow-popover);
     color: var(--color-foreground);
     font-family: var(--font-family);
     font-size: var(--font-size);
@@ -995,10 +1022,10 @@ button.crypto-remove:disabled {
     background-color: var(--color-popover);
     border: 1px solid var(--color-surface-border);
     border-radius: var(--radius-popover);
-    box-shadow: 0 8px 24px var(--color-popover-shadow);
+    box-shadow: var(--shadow-modal);
     color: var(--color-foreground);
     font-family: var(--font-family);
-    font-size: var(--font-size);
+    font-size: var(--dialog-font-size);
     font-weight: 400;
     padding: 16px;
 }
@@ -1011,7 +1038,7 @@ button.crypto-remove:disabled {
 entry.location-search,
 entry.location-coordinate {
     min-height: 32px;
-    padding: 4px 10px;
+    padding: 4px 14px;
     background: none;
     background-color: var(--color-card);
     border: 1px solid transparent;
@@ -1024,6 +1051,13 @@ entry.location-search:focus-within,
 entry.location-coordinate:focus-within {
     border-color: var(--color-accent);
     outline: none;
+}
+
+/* Leading search icons have their own allocation; reserve a visible gap
+   before the query so the caret never crowds the icon. */
+entry.location-search > image.left,
+entry.chooser-search > image.left {
+    margin-right: 6px;
 }
 
 /* Empty until a search returns something, so it must not reserve anything of
@@ -1102,6 +1136,314 @@ button.dialog-button-primary {
 button.dialog-button-primary:hover {
     background-color: var(--color-accent);
     opacity: 0.9;
+}
+
+/* ===== Launcher ===== */
+
+.launcher-window {
+    background: transparent;
+    box-shadow: none;
+}
+
+/* The opaque palette color is the safe default until compositor blur is usable.
+   With blur, the palette scrim lets the wallpaper show through. */
+.launcher-backdrop {
+    background-color: var(--color-launcher-backdrop);
+}
+
+.launcher-backdrop-blurred {
+    background-color: var(--color-launcher-scrim);
+}
+
+.launcher {
+    background-color: var(--color-popover);
+    border: 1px solid var(--color-surface-border);
+    border-radius: var(--radius-popover);
+    box-shadow: var(--shadow-modal);
+    color: var(--color-foreground);
+    font-family: var(--font-family);
+    font-size: var(--launcher-font-size);
+    padding: 20px;
+}
+
+entry.launcher-search {
+    min-height: 52px;
+    /* Keep the insertion caret comfortably inside the pill outline. */
+    padding: 6px 20px;
+    background: none;
+    background-color: var(--color-card);
+    border: 1px solid transparent;
+    border-radius: 9999px;
+    box-shadow: none;
+    color: var(--color-foreground);
+    font-size: 1.1em;
+}
+
+entry.launcher-search:focus-within {
+    border-color: var(--color-accent);
+    outline: none;
+}
+
+button.launcher-filter {
+    min-height: 32px;
+    padding: 2px 12px;
+    background: none;
+    border: none;
+    box-shadow: none;
+    border-radius: 9999px;
+    color: var(--color-foreground-muted);
+    font-size: 0.95em;
+}
+
+button.launcher-filter:hover,
+button.launcher-filter-selected {
+    background-color: var(--color-widget-checked);
+    color: var(--color-foreground);
+}
+
+.launcher-scroll,
+.launcher-results,
+.launcher-list {
+    background: transparent;
+}
+
+.launcher-section {
+    margin-top: 6px;
+    color: var(--color-foreground-muted);
+    font-size: 0.95em;
+    font-weight: 700;
+}
+
+flowbox.launcher-grid {
+    border-spacing: 8px;
+}
+
+button.launcher-item {
+    min-width: 148px;
+    min-height: 118px;
+    padding: 10px;
+    background: none;
+    border: 1px solid transparent;
+    box-shadow: none;
+    border-radius: var(--radius-card);
+    color: var(--color-foreground);
+}
+
+button.launcher-item:hover,
+button.launcher-item-selected {
+    background-color: var(--color-widget-hover);
+    border-color: var(--color-accent);
+}
+
+button.launcher-item.launcher-row {
+    min-width: 0;
+    min-height: 44px;
+    padding: 6px 10px;
+}
+
+button.launcher-item.launcher-row .launcher-icon {
+    -gtk-icon-size: 24px;
+}
+
+.launcher-icon {
+    -gtk-icon-size: 72px;
+}
+
+.launcher-item-title {
+    font-size: 1.06em;
+    font-weight: 700;
+}
+
+.launcher-item b {
+    color: var(--color-accent);
+}
+
+.launcher-item-subtitle,
+.launcher-status {
+    color: var(--color-foreground-muted);
+    font-size: 0.95em;
+}
+
+.launcher-item-subtitle {
+    font-style: italic;
+}
+
+/* ===== Standalone chooser ===== */
+
+/* Choosers share the dialog vocabulary but run in their own process, so their
+   classes spell out the complete surface rather than relying on a panel root. */
+.chooser-window {
+    background: transparent;
+    box-shadow: none;
+}
+
+.chooser-backdrop {
+    background-color: rgba(0, 0, 0, 0.45);
+}
+
+.chooser-dialog {
+    background-color: var(--color-dialog-surface);
+    border: 1px solid var(--color-surface-border);
+    border-radius: var(--radius-popover);
+    box-shadow: var(--shadow-modal);
+    color: var(--color-foreground);
+    font-family: var(--font-family);
+    font-size: var(--dialog-font-size);
+    font-weight: 400;
+    padding: 16px;
+}
+
+.chooser-title {
+    font-size: 1.2em;
+    font-weight: 700;
+}
+
+.chooser-message,
+.chooser-subtitle,
+.chooser-empty {
+    color: var(--color-foreground-muted);
+    font-size: 0.95em;
+}
+
+.chooser-message,
+.chooser-subtitle,
+.chooser-empty,
+.chooser-mode {
+    font-style: italic;
+}
+
+entry.chooser-search {
+    min-height: 32px;
+    padding: 4px 14px;
+    background: none;
+    background-color: var(--color-card);
+    border: 1px solid transparent;
+    border-radius: var(--radius-card);
+    box-shadow: none;
+    color: var(--color-foreground);
+}
+
+entry.chooser-search:focus-within {
+    border-color: var(--color-accent);
+    outline: none;
+}
+
+.chooser-results {
+    background: transparent;
+}
+
+button.chooser-result {
+    min-height: 44px;
+    padding: 8px 10px;
+    background: none;
+    border: 1px solid transparent;
+    box-shadow: none;
+    border-radius: var(--radius-card);
+    color: var(--color-foreground);
+}
+
+button.chooser-result:hover {
+    background-color: var(--color-widget-hover);
+}
+
+button.chooser-result:focus-visible,
+button.chooser-result-selected:focus-visible {
+    border-color: var(--color-accent);
+    outline: none;
+}
+
+/* The marker for the applied item and keyboard selection stay independent:
+   browsing a new item never makes the desktop look as if it already changed. */
+button.chooser-result-selected {
+    background-color: var(--color-widget-checked);
+    border-color: var(--color-accent);
+}
+
+button.chooser-result-current {
+    border-style: solid;
+}
+
+.chooser-label {
+    font-weight: 700;
+}
+
+.chooser-mode,
+.chooser-current {
+    color: var(--color-foreground-muted);
+    font-size: 0.9em;
+}
+
+.chooser-current {
+    color: var(--color-accent);
+    font-weight: 700;
+}
+
+.chooser-preview,
+.chooser-theme-sample {
+    padding: 8px;
+    background-color: var(--color-card);
+    border-radius: var(--radius-card);
+}
+
+.chooser-preview-image,
+.chooser-swatch {
+    border-radius: 8px;
+}
+
+.chooser-actions {
+    margin-top: 4px;
+}
+
+/* ===== Pinentry ===== */
+
+window.pinentry-window {
+    background: transparent;
+    box-shadow: none;
+}
+
+.pinentry-backdrop {
+    background-color: rgba(0, 0, 0, 0.52);
+}
+
+.pinentry-dialog {
+    background-color: var(--color-dialog-surface);
+    border: 1px solid var(--color-surface-border);
+    border-radius: var(--radius-popover);
+    box-shadow: var(--shadow-modal);
+    color: var(--color-foreground);
+    font-family: var(--font-family);
+    font-size: var(--dialog-font-size);
+    padding: 16px;
+}
+
+.pinentry-title {
+    font-size: 1.15em;
+    font-weight: 700;
+}
+
+.pinentry-context,
+.pinentry-description {
+    color: var(--color-foreground-muted);
+    font-size: 0.95em;
+}
+
+.pinentry-context {
+    font-style: italic;
+}
+
+.pinentry-error,
+.pinentry-caps-lock {
+    color: var(--color-state-urgent);
+}
+
+entry.pinentry-entry {
+    min-height: 38px;
+    /* Match dialog fields while leaving room for the trailing peek icon. */
+    padding: 6px 14px;
+}
+
+.pinentry-actions {
+    margin-top: 4px;
 }
 
 /* ===== Media ===== */
@@ -1491,7 +1833,7 @@ window.toast-window {
     background-color: var(--color-popover);
     border: 1px solid var(--color-surface-border);
     border-radius: var(--radius-popover);
-    box-shadow: 0 2px 6px var(--color-popover-shadow);
+    box-shadow: var(--shadow-popover);
     color: var(--color-foreground);
     font-family: var(--font-family);
     font-size: var(--font-size);
@@ -1732,7 +2074,7 @@ window.osd-window {
     background-color: var(--color-popover);
     border: 1px solid var(--color-surface-border);
     border-radius: 9999px;
-    box-shadow: 0 2px 8px var(--color-popover-shadow);
+    box-shadow: var(--shadow-popover);
     color: var(--color-foreground);
     font-family: var(--font-family);
     font-size: var(--font-size);
@@ -2571,7 +2913,119 @@ mod tests {
     fn metrics_scale_with_the_bar_height() {
         assert_eq!(widget_height(36), 24);
         assert_eq!(font_size(36), 14);
+        assert_eq!(dialog_font_size(36), 16);
+        assert_eq!(launcher_font_size(36), 20);
+        assert!(launcher_font_size(48) > launcher_font_size(36));
+        assert!(dialog_font_size(48) > dialog_font_size(36));
         assert!(widget_height(48) > widget_height(36));
         assert!(font_size(48) > font_size(36));
+    }
+
+    #[test]
+    fn launcher_backdrop_uses_palette_scrim_and_opaque_default() {
+        let mut config = Config::default();
+        config.theme.mode = "light".into();
+        config.theme.palette.background = Some("#dce6f0".into());
+        let css = generate(&config);
+
+        assert!(css.contains("--color-launcher-backdrop: #dce6f0;"));
+        assert!(css.contains("--color-launcher-scrim: rgba(220, 230, 240, 0.78);"));
+        assert!(css.contains(
+            ".launcher-backdrop {\n    background-color: var(--color-launcher-backdrop);"
+        ));
+        assert!(css.contains(
+            ".launcher-backdrop-blurred {\n    background-color: var(--color-launcher-scrim);"
+        ));
+    }
+
+    #[test]
+    fn standalone_dialogs_use_opaque_palette_surface() {
+        for (mode, surface) in [("light", "#dce6f0"), ("dark", "#18212a")] {
+            let mut config = Config::default();
+            config.theme.mode = mode.into();
+            config.theme.palette.surface = Some(surface.into());
+            config.widgets.popover_background_opacity = Some(0.76);
+            let css = generate(&config);
+
+            assert!(css.contains(&format!("--color-dialog-surface: {surface};")));
+            for selector in [".chooser-dialog", ".pinentry-dialog"] {
+                assert!(css.contains(&format!(
+                    "{selector} {{\n    background-color: var(--color-dialog-surface);"
+                )));
+            }
+        }
+    }
+
+    #[test]
+    fn modal_windows_leave_shadow_to_their_rounded_content() {
+        let css = generate(&Config::default());
+        for selector in [
+            "window.launcher-window",
+            "window.chooser-window",
+            "window.pinentry-window",
+        ] {
+            assert!(
+                css.contains(&format!("{selector},")) || css.contains(&format!("{selector} {{"))
+            );
+        }
+        assert!(css.contains("--dialog-font-size: 16px;"));
+        assert!(css.contains(".chooser-message,\n.chooser-subtitle,"));
+    }
+
+    #[test]
+    fn text_entries_keep_the_caret_clear_of_their_edges_and_icons() {
+        let css = generate(&Config::default());
+        for (selector, padding) in [
+            ("entry.launcher-search", "padding: 6px 20px;"),
+            ("entry.chooser-search", "padding: 4px 14px;"),
+            ("entry.pinentry-entry", "padding: 6px 14px;"),
+        ] {
+            let rule = css
+                .split_once(&format!("{selector} {{"))
+                .and_then(|(_, rest)| rest.split_once('}'))
+                .map(|(rule, _)| rule)
+                .expect("entry selector must have a CSS rule");
+            assert!(rule.contains(padding), "{selector} lost its text inset");
+        }
+
+        let location_rule = css
+            .split_once("entry.location-search,\nentry.location-coordinate {")
+            .and_then(|(_, rest)| rest.split_once('}'))
+            .map(|(rule, _)| rule)
+            .expect("location entry selector must have a CSS rule");
+        assert!(location_rule.contains("padding: 4px 14px;"));
+        assert!(css.contains(
+            "entry.location-search > image.left,\nentry.chooser-search > image.left {\n    margin-right: 6px;"
+        ));
+    }
+
+    #[test]
+    fn shadows_are_light_and_use_the_compact_shared_rules() {
+        let css = generate(&Config::default());
+        assert!(css.contains("--color-popover-shadow: rgba(0, 0, 0, 0.28);"));
+        assert!(css.contains("--shadow-popover: 0 1px 4px var(--color-popover-shadow);"));
+        assert!(css.contains("--shadow-modal: 0 4px 14px var(--color-popover-shadow);"));
+
+        for selector in [
+            ".location-dialog",
+            ".launcher",
+            ".chooser-dialog",
+            ".pinentry-dialog",
+        ] {
+            let rule = css
+                .split_once(&format!("{selector} {{"))
+                .and_then(|(_, rest)| rest.split_once('}'))
+                .map(|(rule, _)| rule)
+                .expect("modal selector must have a CSS rule");
+            assert!(rule.contains("box-shadow: var(--shadow-modal);"));
+        }
+        for selector in [".popover-surface", ".toast", ".osd-capsule"] {
+            let rule = css
+                .split_once(&format!("{selector} {{"))
+                .and_then(|(_, rest)| rest.split_once('}'))
+                .map(|(rule, _)| rule)
+                .expect("elevated selector must have a CSS rule");
+            assert!(rule.contains("box-shadow: var(--shadow-popover);"));
+        }
     }
 }

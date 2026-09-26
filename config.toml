@@ -24,6 +24,14 @@ popover_offset = 1   # Gap between the bar and popovers anchored to it
 # background_color = "#000000" # Optional override; unset inherits theme.palette.background
 background_opacity = 1.0
 
+[launcher]
+file_roots = ["~"]
+file_exclusions = []
+
+[appearance]
+# theme_command = ["theme-switch"]
+# wallpaper_command = ["theme-switch", "--pick-wallpaper"]
+
 [widgets]
 # Placement. Available widgets: workspaces, clock, weather, crypto, tray,
 # system_monitor, headset, keyboard_layout, quick_settings, os_logo, and any

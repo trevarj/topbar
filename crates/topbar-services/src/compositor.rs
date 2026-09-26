@@ -44,6 +44,32 @@ pub struct WorkspacesSnapshot {
     pub focused_output: Option<String>,
 }
 
+/// One live niri window shown in launcher search.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowView {
+    /// Native identity used for exact activation.
+    pub id: u64,
+    /// Window title.
+    pub title: String,
+    /// Application identity reported by niri.
+    pub app_id: String,
+    /// Current workspace name or index.
+    pub workspace: Option<String>,
+    /// Output connector, when assigned.
+    pub output: Option<String>,
+    /// Last focus time, for application window preference.
+    pub focused_at_ms: Option<u128>,
+}
+
+/// Window projection; disconnected snapshots deliberately hide stale results.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WindowsSnapshot {
+    /// Whether the stream currently belongs to a live compositor.
+    pub connected: bool,
+    /// Stable ordering by native window ID.
+    pub windows: Vec<WindowView>,
+}
+
 impl WorkspacesSnapshot {
     /// The workspaces belonging to one connector.
     pub fn for_output(&self, connector: &str) -> &[WorkspaceView] {
@@ -179,6 +205,14 @@ impl Compositor {
         }
     }
 
+    /// Subscribe to launcher window state.
+    pub fn windows(&self) -> watch::Receiver<Arc<WindowsSnapshot>> {
+        match self {
+            Self::Niri(service) => service.windows(),
+            Self::Disconnected(_) => watch::channel(Arc::new(WindowsSnapshot::default())).1,
+        }
+    }
+
     /// Interrupt reconnect backoff after resume.
     pub fn health_check(&self) {
         match self {
@@ -189,6 +223,13 @@ impl Compositor {
 }
 
 impl CompositorHandle {
+    /// Activate exactly one captured window ID.
+    pub async fn focus_window(&self, id: u64) -> Result<(), SvcError> {
+        match self {
+            Self::Niri(handle) => handle.focus_window(id).await,
+            Self::Disconnected(error) => Err(SvcError::CompositorSelection(error.clone())),
+        }
+    }
     /// Focus the captured native workspace ID.
     pub async fn focus_workspace(&self, id: WorkspaceId) -> Result<(), SvcError> {
         match self {
@@ -201,6 +242,18 @@ impl CompositorHandle {
     pub async fn focus_app(&self, identities: &[&str]) -> Result<bool, SvcError> {
         match self {
             Self::Niri(handle) => handle.focus_app(identities).await,
+            Self::Disconnected(error) => Err(SvcError::CompositorSelection(error.clone())),
+        }
+    }
+
+    /// Focus an existing launcher application after querying niri live.
+    ///
+    /// `Ok(false)` means the compositor answered and has no matching window;
+    /// callers may then start a fresh process. Any error must keep that launch
+    /// path closed, since the query or focus action could have failed.
+    pub async fn focus_application(&self, identities: &[&str]) -> Result<bool, SvcError> {
+        match self {
+            Self::Niri(handle) => handle.focus_application(identities).await,
             Self::Disconnected(error) => Err(SvcError::CompositorSelection(error.clone())),
         }
     }
@@ -242,5 +295,15 @@ mod tests {
         assert!(select("auto", "other", true).is_err());
         assert!(select("auto", "", false).is_err());
         assert!(select("other", "niri", true).is_err());
+    }
+
+    #[tokio::test]
+    async fn disconnected_launcher_activation_refuses_to_start_a_duplicate() {
+        let handle = CompositorHandle::Disconnected("niri is reconnecting".into());
+        let error = handle
+            .focus_application(&["org.example.Editor.desktop"])
+            .await
+            .expect_err("a disconnected compositor cannot confirm no window exists");
+        assert!(matches!(error, SvcError::CompositorSelection(_)));
     }
 }

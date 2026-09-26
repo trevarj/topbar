@@ -32,15 +32,16 @@ use gtk4::prelude::*;
 use gtk4::{
     Align, Button, DropDown, Entry, Expander, Label, Orientation, Window, gdk, glib, pango,
 };
-use gtk4_layer_shell::{KeyboardMode, Layer, LayerShell};
+use gtk4_layer_shell::{KeyboardMode, LayerShell};
 use topbar_core::config::WeatherConfig;
+use topbar_services::ipc::InputLock;
 use topbar_services::weather::{TemperatureUnit, valid_coordinates};
 use topbar_services::{GeocodeResult, Runtime, Services};
 use tracing::{debug, warn};
 
 use crate::bridge::{self, ActionScope};
 use crate::style::classes;
-use crate::surfaces::popovers;
+use crate::surfaces::modal;
 
 /// Where this dialog's failures are reported.
 const SCOPE: ActionScope = ActionScope::Toast { widget: "weather" };
@@ -80,28 +81,21 @@ pub fn present(config: &WeatherConfig, services: &Services, anchor: &impl IsA<gt
         dialog.window.present();
         return;
     }
+    let Some(input) = modal::claim_input() else {
+        return;
+    };
 
     // The gear that opened this usually lives inside a popover, and a menu
     // still on screen behind a modal reads as two things being open at once.
-    close_popovers();
-    // Again once the event that got us here has finished propagating. The
-    // other way in is a click on the widget itself, which the popover's own
-    // gesture is also watching: claiming the sequence should stop it, but
-    // "should" is not something to leave a stray menu behind a modal on.
-    glib::idle_add_local_once(close_popovers);
+    modal::close_popovers();
 
-    let dialog = Dialog::new(config, services, monitor_of(anchor).as_ref());
+    let dialog = Dialog::new(config, services, modal::monitor_of(anchor).as_ref(), input);
     CURRENT.with_borrow_mut(|current| *current = Some(Rc::clone(&dialog)));
     dialog.open();
 }
 
-/// Take down whatever popover is on screen.
-fn close_popovers() {
-    popovers::dispatch(&topbar_core::ipc::PopoverAction::Hide(None), None);
-}
-
 /// Close whatever is open. Used by the panel's own teardown and by Escape.
-fn dismiss() {
+pub fn dismiss() {
     let dialog = CURRENT.with_borrow_mut(|current| current.take());
     if let Some(dialog) = dialog {
         dialog.window.set_visible(false);
@@ -111,22 +105,9 @@ fn dismiss() {
     }
 }
 
-/// The monitor a widget is being displayed on.
-fn monitor_of(anchor: &impl IsA<gtk4::Widget>) -> Option<gdk::Monitor> {
-    let widget = anchor.as_ref();
-    let display = widget.display();
-    let surface = widget
-        .root()
-        .and_then(|root| root.downcast::<Window>().ok())
-        .and_then(|window| window.surface());
-
-    surface
-        .and_then(|surface| display.monitor_at_surface(&surface))
-        .or_else(|| display.monitors().item(0).and_downcast::<gdk::Monitor>())
-}
-
 /// The dialog and everything it is holding on to.
 struct Dialog {
+    _input: InputLock,
     window: Window,
     backdrop: Window,
     search: Entry,
@@ -152,11 +133,17 @@ impl Dialog {
         config: &WeatherConfig,
         services: &Services,
         monitor: Option<&gdk::Monitor>,
+        input: InputLock,
     ) -> Rc<Self> {
         // The backdrop is built first so the compositor stacks it below the
         // dialog: layer surfaces in one layer keep their creation order.
-        let backdrop = build_backdrop(monitor);
-        let window = build_window(monitor);
+        let backdrop = modal::backdrop(
+            monitor,
+            "topbar-dialog-backdrop",
+            classes::LOCATION_BACKDROP,
+        );
+        let window = modal::centered_window(monitor, "topbar-dialog");
+        window.add_css_class(classes::LOCATION_WINDOW);
 
         let root = gtk4::Box::new(Orientation::Vertical, 10);
         root.add_css_class(classes::LOCATION_DIALOG);
@@ -237,6 +224,7 @@ impl Dialog {
         window.set_child(Some(&root));
 
         let dialog = Rc::new(Self {
+            _input: input,
             window,
             backdrop,
             search,
@@ -541,57 +529,6 @@ fn coordinate_entry(placeholder: &str) -> Entry {
     entry.set_hexpand(true);
     entry.set_input_purpose(gtk4::InputPurpose::Number);
     entry
-}
-
-/// The dialog's own layer surface: centred, above everything.
-fn build_window(monitor: Option<&gdk::Monitor>) -> Window {
-    let window = Window::builder().decorated(false).resizable(false).build();
-    window.add_css_class(classes::LOCATION_WINDOW);
-
-    window.init_layer_shell();
-    window.set_namespace(Some("topbar-dialog"));
-    // Overlay rather than Top: a modal the user has to answer belongs above
-    // the panel's own menus, and above a fullscreen window.
-    window.set_layer(Layer::Overlay);
-    if let Some(monitor) = monitor {
-        window.set_monitor(Some(monitor));
-    }
-    // No anchors at all, which is how layer-shell says "centre me".
-    window.set_exclusive_zone(0);
-    window.set_keyboard_mode(KeyboardMode::OnDemand);
-    window
-}
-
-/// The dimmed surface behind it.
-fn build_backdrop(monitor: Option<&gdk::Monitor>) -> Window {
-    let window = Window::builder().decorated(false).build();
-    window.add_css_class(classes::LOCATION_WINDOW);
-
-    window.init_layer_shell();
-    window.set_namespace(Some("topbar-dialog-backdrop"));
-    window.set_layer(Layer::Overlay);
-    if let Some(monitor) = monitor {
-        window.set_monitor(Some(monitor));
-    }
-    // Covering the bar too, unlike a popover's catcher: a modal that leaves
-    // the panel clickable is not modal.
-    window.set_exclusive_zone(-1);
-    for edge in [
-        gtk4_layer_shell::Edge::Top,
-        gtk4_layer_shell::Edge::Bottom,
-        gtk4_layer_shell::Edge::Left,
-        gtk4_layer_shell::Edge::Right,
-    ] {
-        window.set_anchor(edge, true);
-    }
-    window.set_keyboard_mode(KeyboardMode::None);
-
-    let surface = gtk4::Box::new(Orientation::Vertical, 0);
-    surface.add_css_class(classes::LOCATION_BACKDROP);
-    surface.set_hexpand(true);
-    surface.set_vexpand(true);
-    window.set_child(Some(&surface));
-    window
 }
 
 #[cfg(test)]

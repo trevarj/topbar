@@ -47,6 +47,21 @@ struct Inner {
 type Connection = Framed<UnixStream, LinesCodec>;
 
 impl NiriHandle {
+    /// Focus one exact window, rejecting IDs that disappeared since rendering.
+    pub async fn focus_window(&self, id: u64) -> Result<(), SvcError> {
+        let windows = match self.request(Request::Windows).await? {
+            Response::Windows(windows) => windows,
+            other => {
+                return Err(SvcError::Protocol(format!(
+                    "expected Windows, got {other:?}"
+                )));
+            }
+        };
+        if !windows.iter().any(|window| window.id == id) {
+            return Err(SvcError::Rejected("window is no longer open".into()));
+        }
+        self.act(Action::FocusWindow { id }).await
+    }
     /// Create a handle for `socket`, or a handle that always fails if there is
     /// none.
     pub(crate) fn new(socket: Option<PathBuf>) -> Self {
@@ -92,6 +107,34 @@ impl NiriHandle {
 
         let Some(id) = pick_window(&windows, identities) else {
             debug!("no window matches {identities:?}; nothing to raise");
+            return Ok(false);
+        };
+
+        self.act(Action::FocusWindow { id }).await?;
+        Ok(true)
+    }
+
+    /// Raise the most recently focused window for one launcher application.
+    ///
+    /// Launcher activation must consult niri directly instead of trusting the
+    /// event stream: it can be cold or reconnecting while an existing window
+    /// is still open. Every supplied desktop-entry or `StartupWMClass`
+    /// identity participates in one global MRU choice. Unlike notification
+    /// activation, urgency has no bearing on this choice.
+    ///
+    /// Returns `Ok(false)` only after a live window query found no match.
+    pub async fn focus_application(&self, identities: &[&str]) -> Result<bool, SvcError> {
+        let windows = match self.request(Request::Windows).await? {
+            Response::Windows(windows) => windows,
+            other => {
+                return Err(SvcError::Protocol(format!(
+                    "expected Windows, got {other:?}"
+                )));
+            }
+        };
+
+        let Some(id) = pick_launcher_window(&windows, identities) else {
+            debug!("no live window matches launcher application {identities:?}");
             return Ok(false);
         };
 
@@ -202,6 +245,26 @@ fn pick_window(windows: &[Window], identities: &[&str]) -> Option<u64> {
     })
 }
 
+/// The launcher uses desktop IDs and explicit `StartupWMClass` aliases as one
+/// identity set. All candidates compete by focus time, rather than identity
+/// order or urgency, so reopening an application always raises where the user
+/// last left it.
+fn pick_launcher_window(windows: &[Window], identities: &[&str]) -> Option<u64> {
+    windows
+        .iter()
+        .filter(|window| {
+            window.app_id.as_deref().is_some_and(|app_id| {
+                identities
+                    .iter()
+                    .any(|identity| same_launcher_application(app_id, identity))
+            })
+        })
+        // Through `Duration`: niri's own `Timestamp` is not orderable.
+        // The native ID makes otherwise equal timestamps deterministic.
+        .max_by_key(|window| (window.focus_timestamp.map(Duration::from), window.id))
+        .map(|window| window.id)
+}
+
 /// Whether a window's app id and a notification's idea of its sender are the
 /// same application.
 ///
@@ -210,6 +273,18 @@ fn pick_window(windows: &[Window], identities: &[&str]) -> Option<u64> {
 fn same_app(app_id: &str, identity: &str) -> bool {
     fn normalise(value: &str) -> String {
         value.trim().trim_start_matches('@').to_lowercase()
+    }
+
+    normalise(app_id) == normalise(identity)
+}
+
+/// Normalise only forms a desktop entry can explicitly name. This accepts
+/// niri's bare desktop ID beside its `.desktop` form while retaining exact
+/// equality for `StartupWMClass` aliases.
+fn same_launcher_application(app_id: &str, identity: &str) -> bool {
+    fn normalise(value: &str) -> String {
+        let value = value.trim().trim_start_matches('@').to_ascii_lowercase();
+        value.strip_suffix(".desktop").unwrap_or(&value).to_owned()
     }
 
     normalise(app_id) == normalise(identity)
@@ -333,6 +408,39 @@ mod tests {
         ];
 
         assert_eq!(pick_window(&windows, &["chat"]), Some(2));
+    }
+
+    #[test]
+    fn launcher_uses_global_mru_across_desktop_id_and_wm_class() {
+        let mut urgent = focused_at(window(1, "org.example.Editor"), 10);
+        urgent.is_urgent = true;
+        let windows = [
+            urgent,
+            focused_at(window(2, "EditorWindow"), 500),
+            focused_at(window(3, "unrelated"), 900),
+        ];
+
+        assert_eq!(
+            pick_launcher_window(&windows, &["org.example.Editor.desktop", "EditorWindow"]),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn launcher_identity_matching_rejects_partial_names() {
+        let windows = [window(1, "org.example.Editor")];
+
+        assert_eq!(pick_launcher_window(&windows, &["org.example.Edit"]), None);
+    }
+
+    #[test]
+    fn launcher_normalises_desktop_suffix_case_before_exact_comparison() {
+        let windows = [window(1, "ORG.EXAMPLE.EDITOR.DESKTOP")];
+
+        assert_eq!(
+            pick_launcher_window(&windows, &["org.example.Editor"]),
+            Some(1)
+        );
     }
 
     #[test]

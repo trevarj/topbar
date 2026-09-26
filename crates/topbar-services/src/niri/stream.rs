@@ -28,7 +28,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::codec::{Framed, LinesCodec};
 use tracing::{debug, info, warn};
 
-use crate::compositor::{KeyboardLayoutSnapshot, WorkspacesSnapshot};
+use crate::compositor::{KeyboardLayoutSnapshot, WindowsSnapshot, WorkspacesSnapshot};
 use crate::error::SvcError;
 use crate::niri::snapshot;
 
@@ -43,6 +43,7 @@ const LOG_LINE_LIMIT: usize = 200;
 pub(crate) struct Publishers {
     pub workspaces: watch::Sender<Arc<WorkspacesSnapshot>>,
     pub keyboard_layout: watch::Sender<Arc<KeyboardLayoutSnapshot>>,
+    pub windows: watch::Sender<Arc<WindowsSnapshot>>,
 }
 
 /// Run the event stream until the process exits.
@@ -213,6 +214,7 @@ impl Publishers {
             &self.keyboard_layout,
             snapshot::keyboard_layout(state, true),
         );
+        send_if_changed(&self.windows, snapshot::windows(state, true));
     }
 
     /// Keep the last state on screen but mark it as no longer live.
@@ -238,6 +240,9 @@ impl Publishers {
             .clone()
             .with_connected(false);
         send_if_changed(&self.keyboard_layout, layouts);
+
+        // Launcher results must never retain windows from a disconnected niri.
+        send_if_changed(&self.windows, WindowsSnapshot::default());
     }
 }
 
@@ -277,6 +282,18 @@ mod tests {
 
     fn snapshot(state: &EventStreamState) -> WorkspacesSnapshot {
         snapshot::workspaces(state, true)
+    }
+
+    #[test]
+    fn window_projection_hides_disconnected_results() {
+        let state = replay(BURST);
+        let live = snapshot::windows(&state, true);
+        assert!(live.connected);
+        assert!(!live.windows.is_empty());
+        assert!(live.windows.windows(2).all(|pair| pair[0].id < pair[1].id));
+        let disconnected = snapshot::windows(&state, false);
+        assert!(!disconnected.connected);
+        assert!(disconnected.windows.is_empty());
     }
 
     #[test]
