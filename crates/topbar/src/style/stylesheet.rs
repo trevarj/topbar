@@ -1164,6 +1164,7 @@ entry.launcher-search {
     /* Keep the insertion caret comfortably inside the pill outline. */
     padding: 6px 20px;
     background: none;
+    background-color: var(--color-surface);
     border: 1px solid var(--color-foreground-muted);
     border-radius: 9999px;
     box-shadow: none;
