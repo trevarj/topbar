@@ -96,6 +96,9 @@ pub enum Command {
         /// ID of the currently applied item
         #[arg(long)]
         selected: Option<String>,
+        /// Executable providing on-demand Wallhaven search and save (wallpapers only)
+        #[arg(long, requires = "layout")]
+        wallpaper_provider: Option<std::path::PathBuf>,
     },
     /// Serve the GnuPG pinentry protocol on standard input and output.
     Pinentry,

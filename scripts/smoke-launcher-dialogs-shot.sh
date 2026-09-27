@@ -415,6 +415,161 @@ EOF
   fi
 )
 
+# Measure the dialog against the flat backdrop along a row above the results,
+# then follow its padding at the left edge. Preview pixels never enter the scan.
+wallpaper_dialog_bounds() {
+  python3 - "$1" <<'PY'
+import subprocess
+import sys
+
+frame = sys.argv[1]
+width, height = map(int, subprocess.check_output(
+    ["magick", frame, "-format", "%w %h", "info:"], text=True).split())
+pixels = subprocess.check_output(
+    ["magick", frame, "-alpha", "off", "-depth", "8", "rgb:-"])
+def colour(x, y):
+    offset = (y * width + x) * 3
+    return pixels[offset:offset + 3]
+
+background = colour(0, height // 2)
+def dialog(pixel):
+    return sum(abs(a - b) for a, b in zip(pixel, background)) > 5
+
+row = height // 6
+left = next((x for x in range(width // 2)
+             if all(dialog(colour(j, row)) for j in range(x, x + 8))), None)
+right = next((x for x in range(width - 1, width // 2, -1)
+              if all(dialog(colour(j, row)) for j in range(x - 7, x + 1))), None)
+if left is None or right is None:
+    raise SystemExit("wallpaper chooser: horizontal dialog bounds were not found")
+gutter = left + 8
+top = next((y for y in range(height // 20, height // 2)
+            if all(dialog(colour(gutter, j)) for j in range(y, y + 8))), None)
+bottom = next((y for y in range(height - 1, height // 2, -1)
+               if all(dialog(colour(gutter, j)) for j in range(y - 7, y + 1))), None)
+if top is None or bottom is None:
+    raise SystemExit("wallpaper chooser: vertical dialog bounds were not found")
+if left <= 0 or right >= width - 1 or top <= 0 or bottom >= height - 1:
+    raise SystemExit("wallpaper chooser: dialog clipped by output")
+print(left, top, right - left + 1, bottom - top + 1)
+PY
+}
+
+# A settled capture can still show the frame before a key press on nested niri.
+# Wait for the selected card itself to move before treating its shot as evidence.
+wait_for_wallpaper_selection() {
+  name=$1
+  minimum=$2
+  maximum=$3
+  attempts=0
+  while [ "$attempts" -lt 6 ]; do
+    shot "$name" topbar-chooser >"$art/$name.wait.log" || return 1
+    frame="$art/$name.png"
+    image_geometry=$(magick "$frame" -format '%w %h' info:) || return 1
+    IFS=' ' read -r image_width image_height <<EOF
+$image_geometry
+EOF
+    if outline=$(selected_card_outline "$frame" "$((image_width / 7))" \
+      "$((image_height / 6))" "$((image_height / 30))" "$((image_height * 9 / 10))"); then
+      IFS=' ' read -r row_x row_top row_width row_bottom <<EOF
+$outline
+EOF
+      if [ "$row_top" -ge "$minimum" ] && [ "$row_top" -le "$maximum" ]; then
+        printf '%s %s\n' "$row_top" "$row_bottom"
+        return 0
+      fi
+    fi
+    attempts=$((attempts + 1))
+  done
+  echo "wallpaper chooser: selection did not move into $name after $attempts captures" >&2
+  return 1
+}
+
+assert_wallpaper_dialog_stable() {
+  baseline=$(wallpaper_dialog_bounds "$art/chooser-wallpapers-preview-valid.png") || return 1
+  for state in failed portrait returned; do
+    measured=$(wallpaper_dialog_bounds "$art/chooser-wallpapers-preview-$state.png") || return 1
+    if [ "$measured" != "$baseline" ]; then
+      echo "wallpaper chooser resized on $state: $baseline -> $measured" >&2
+      return 1
+    fi
+  done
+  printf 'wallpaper dialog stayed at %s across loaded, failed, portrait, and returned previews\n' \
+    "$baseline" >"$art/chooser-wallpapers-bounds.txt"
+}
+
+wallpaper_preview_crop() {
+  bounds=$(wallpaper_dialog_bounds "$1") || return 1
+  IFS=' ' read -r dialog_x dialog_y dialog_width dialog_height <<EOF
+$bounds
+EOF
+  crop_width=$((dialog_width * 3 / 5))
+  crop_height=$((dialog_height / 4))
+  crop_x=$((dialog_x + (dialog_width - crop_width) / 2))
+  crop_y=$((dialog_y + dialog_height - dialog_height / 12 - crop_height))
+  printf '%sx%s+%s+%s\n' "$crop_width" "$crop_height" "$crop_x" "$crop_y"
+}
+
+assert_wallpaper_preview_changes() {
+  # Compare only the image area; a selected-card border is not proof of a swap.
+  crop=$(wallpaper_preview_crop "$art/chooser-wallpapers-preview-valid.png") || return 1
+  difference=$(magick "$art/chooser-wallpapers-preview-valid.png" \
+    "$art/chooser-wallpapers-preview-portrait.png" -compose Difference -composite \
+    -crop "$crop" +repage -colorspace Gray -format '%[fx:mean]' info:) || return 1
+  if ! awk -v difference="$difference" 'BEGIN { exit !(difference > 0.015) }'; then
+    echo "wallpaper chooser: portrait image did not replace the loaded preview" >&2
+    return 1
+  fi
+}
+
+wait_for_wallpaper_preview() {
+  attempts=0
+  while [ "$attempts" -lt 6 ]; do
+    if assert_wallpaper_preview_changes 2>/dev/null; then
+      return 0
+    fi
+    shot chooser-wallpapers-preview-portrait topbar-chooser \
+      >"$art/chooser-wallpapers-preview-portrait.wait.log" || return 1
+    attempts=$((attempts + 1))
+  done
+  echo "wallpaper chooser: portrait preview did not replace the wide image" >&2
+  return 1
+}
+# This fixture uses blue gradients for both decoded images. The failed
+# preview is a neutral missing-image icon; count colour only inside the
+# preview area, not the changing selected card in the results above it.
+wallpaper_preview_colour_fraction() {
+  crop=$(wallpaper_preview_crop "$1") || return 1
+  python3 - "$1" "$crop" <<'PY'
+import subprocess
+import sys
+
+pixels = subprocess.check_output(
+    ["magick", sys.argv[1], "-crop", sys.argv[2], "+repage",
+     "-alpha", "off", "-depth", "8", "rgb:-"])
+blue = sum(b > r + 24 and b > g + 12 and b > 95
+           for r, g, b in zip(pixels[::3], pixels[1::3], pixels[2::3]))
+print(blue / (len(pixels) // 3))
+PY
+}
+
+wait_for_wallpaper_preview_colour() {
+  name=$1
+  kind=$2
+  attempts=0
+  while [ "$attempts" -lt 6 ]; do
+    fraction=$(wallpaper_preview_colour_fraction "$art/$name.png") || return 1
+    if [ "$kind" = ready ]; then
+      awk -v n="$fraction" 'BEGIN { exit !(n > 0.1) }' && return 0
+    else
+      awk -v n="$fraction" 'BEGIN { exit !(n < 0.02) }' && return 0
+    fi
+    shot "$name" topbar-chooser >"$art/$name.wait.log" || return 1
+    attempts=$((attempts + 1))
+  done
+  echo "wallpaper chooser: $kind preview did not appear in $name" >&2
+  return 1
+}
 wallpaper_selected_outline() (
   frame=$1
   image_geometry=$(magick "$frame" -format '%w %h' info:) || exit 1
@@ -1139,6 +1294,113 @@ type_text "unreadable"
 # so the capture records its visible local failure rather than a timer guess.
 check shot chooser-wallpapers-unreadable topbar-chooser
 finish_chooser_cancelled wallpapers
+
+# A compact output deliberately hides previews to keep its result rows. Scale
+# down this focused second chooser so the screenshot exercises preview swaps.
+original_scale="${TOPBAR_SMOKE_SCALE:-1.25}"
+niri msg output winit scale 0.5 >>"$art/output-scale.log" 2>&1
+TOPBAR_SMOKE_SCALE=0.5
+export TOPBAR_SMOKE_SCALE
+check start_chooser wallpapers-preview "$SMOKE_CONFIG" wallpapers valid "$wallpaper_json"
+check shot chooser-wallpapers-preview-valid topbar-chooser
+frame_height=$(magick "$art/chooser-wallpapers-preview-valid.png" -format '%h' info:)
+first=$(wait_for_wallpaper_selection chooser-wallpapers-preview-valid 0 "$frame_height") || exit 1
+IFS=' ' read -r first_top first_bottom <<EOF
+$first
+EOF
+row_height=$((first_bottom - first_top))
+check wait_for_wallpaper_preview_colour chooser-wallpapers-preview-valid ready
+key_press Down
+failed=$(wait_for_wallpaper_selection chooser-wallpapers-preview-failed \
+  "$((first_top + row_height * 3 / 4))" \
+  "$((first_top + row_height * 3 / 2))") || exit 1
+IFS=' ' read -r failed_top failed_bottom <<EOF
+$failed
+EOF
+check wait_for_wallpaper_preview_colour chooser-wallpapers-preview-failed failed
+key_press Down
+portrait=$(wait_for_wallpaper_selection chooser-wallpapers-preview-portrait \
+  "$((failed_top + row_height * 3 / 4))" \
+  "$((failed_top + row_height * 3 / 2))") || exit 1
+check wait_for_wallpaper_preview
+key_press Up
+key_press Up
+returned=$(wait_for_wallpaper_selection chooser-wallpapers-preview-returned \
+  "$((first_top - row_height / 4))" \
+  "$((first_top + row_height / 4))") || exit 1
+check assert_wallpaper_dialog_stable
+check assert_wallpaper_preview_changes
+finish_chooser_cancelled wallpapers-preview
+niri msg output winit scale "$original_scale" >>"$art/output-scale.log" 2>&1
+TOPBAR_SMOKE_SCALE="$original_scale"
+export TOPBAR_SMOKE_SCALE
+
+echo "--- one mapped tabbed wallpaper chooser during search and save"
+"$SMOKE_TOPBAR" --config "$SMOKE_CONFIG" choose --layout wallpapers \
+  --title "Smoke wallpaper tabs" --wallpaper-provider "$SMOKE_WALLPAPER_PROVIDER" \
+  <"$SMOKE_WALLPAPER_TABS_JSON" >"$art/wallpaper-tabs.result" \
+  2>"$art/wallpaper-tabs.stderr" &
+chooser_pid=$!
+check shot wallpaper-tabs-pool topbar-chooser
+tabbed_bounds=$(wallpaper_dialog_bounds "$art/wallpaper-tabs-pool.png") || fail=1
+if [ -e "$SMOKE_WALLPAPER_GATE/search.ready" ]; then
+  echo "Wallhaven searched before tab activation" >&2
+  fail=1
+fi
+# Ctrl+Tab switches tabs without moving focus away from the search field.
+wtype -M ctrl -k Tab -m ctrl
+if wait_for_marker "$SMOKE_WALLPAPER_GATE/search.ready" "Wallhaven search gate"; then
+  check assert_mapped topbar-chooser "same chooser during search"
+  check assert_mapped topbar-chooser-backdrop "same backdrop during search"
+  snap wallpaper-tabs-search-spinner-a 2
+  snap wallpaper-tabs-search-spinner-b 2
+  searching_bounds=$(wallpaper_dialog_bounds "$art/wallpaper-tabs-search-spinner-a.png") || fail=1
+  if [ "$searching_bounds" != "$tabbed_bounds" ]; then
+    echo "wallpaper chooser resized when switching Local to Wallhaven search" >&2
+    fail=1
+  fi
+  spinner_motion=$(magick "$art/wallpaper-tabs-search-spinner-a.png" \
+    "$art/wallpaper-tabs-search-spinner-b.png" -compose Difference -composite \
+    -colorspace Gray -format '%[fx:mean]' info:) || spinner_motion=0
+  if ! awk -v difference="$spinner_motion" 'BEGIN { exit !(difference > 0.000001) }'; then
+    echo "Wallhaven search spinner did not animate in the mapped chooser" >&2
+    fail=1
+  fi
+  touch "$SMOKE_WALLPAPER_GATE/search.release"
+  check shot wallpaper-tabs-results topbar-chooser
+  results_bounds=$(wallpaper_dialog_bounds "$art/wallpaper-tabs-results.png") || fail=1
+  if [ "$results_bounds" != "$tabbed_bounds" ]; then
+    echo "wallpaper chooser resized when Wallhaven results loaded" >&2
+    fail=1
+  fi
+  key_press Return
+  if wait_for_marker "$SMOKE_WALLPAPER_GATE/save.ready" "Wallhaven save gate"; then
+    check assert_mapped topbar-chooser "same chooser during save"
+    check assert_mapped topbar-chooser-backdrop "same backdrop during save"
+    snap wallpaper-tabs-save-spinner-a 2
+    snap wallpaper-tabs-save-spinner-b 2
+    spinner_motion=$(magick "$art/wallpaper-tabs-save-spinner-a.png" \
+      "$art/wallpaper-tabs-save-spinner-b.png" -compose Difference -composite \
+      -colorspace Gray -format '%[fx:mean]' info:) || spinner_motion=0
+    if ! awk -v difference="$spinner_motion" 'BEGIN { exit !(difference > 0.000001) }'; then
+      echo "Wallhaven save spinner did not animate in the mapped chooser" >&2
+      fail=1
+    fi
+    touch "$SMOKE_WALLPAPER_GATE/save.release"
+  fi
+fi
+# Always release both gates before waiting so failures cannot strand a worker.
+touch "$SMOKE_WALLPAPER_GATE/search.release" "$SMOKE_WALLPAPER_GATE/save.release"
+if ! wait "$chooser_pid"; then
+  echo "tabbed chooser did not save the selected wallpaper" >&2
+  fail=1
+fi
+chooser_pid=""
+if ! grep -q '"kind":"saved"' "$art/wallpaper-tabs.result"; then
+  echo "tabbed chooser did not emit a saved image result" >&2
+  fail=1
+fi
+check assert_unmapped topbar-chooser "tabbed chooser closes after save"
 
 echo "--- standalone pinentry password and confirmation cancellation"
 password_request='SETTITLE Smoke password prompt

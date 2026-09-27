@@ -186,6 +186,7 @@ chmod 700 "$fake_bin/fd"
 # The chooser has to show its local failure state for the latter without a
 # synchronous decoder stalling keyboard input.
 magick -size 640x360 gradient:'#445566-#99aabb' "$fixtures/wallpaper-valid.png"
+magick -size 240x480 gradient:'#557799-#aaccdd' "$fixtures/wallpaper-portrait.png"
 printf 'not an image\n' >"$fixtures/wallpaper-unreadable.png"
 
 state_file="$fixtures/state.json"
@@ -324,7 +325,7 @@ cat >"$wallpaper_json" <<JSON
     "id": "aurora",
     "label": "Aurora coast",
     "subtitle": "Extra fixture row one",
-    "preview_path": "$fixtures/wallpaper-valid.png"
+    "preview_path": "$fixtures/wallpaper-portrait.png"
   },
   {
     "id": "forest",
@@ -346,6 +347,36 @@ cat >"$wallpaper_json" <<JSON
   }
 ]
 JSON
+
+# A gated provider exposes each in-dialog spinner without contacting Wallhaven.
+tabbed_json="$fixtures/wallpaper-tabs.json"
+cat >"$tabbed_json" <<JSON
+{"pool":[{"id":"valid","label":"Golden horizon","preview_path":"$fixtures/wallpaper-valid.png"}],
+ "presets":[{"id":"nature","label":"Nature"},{"id":"mountains","label":"Mountains"},
+            {"id":"buildings","label":"Buildings"},{"id":"abstract","label":"Abstract"}]}
+JSON
+tabbed_provider="$fixtures/wallpaper-provider"
+tabbed_gate="$fixtures/wallpaper-gate"
+mkdir -p "$tabbed_gate"
+printf '#!%s\n' "$shell_program" >"$tabbed_provider"
+cat >>"$tabbed_provider" <<'SH'
+set -eu
+case "$1:$2" in
+  search:nature)
+    printf 'search\n' >"$SMOKE_WALLPAPER_GATE/search.ready"
+    while [ ! -f "$SMOKE_WALLPAPER_GATE/search.release" ]; do sleep 0.1; done
+    printf '[{"id":"9d82vk","label":"Wallhaven Nature / 9d82vk","preview_path":"%s"}]\n' "$SMOKE_WALLPAPER_IMAGE"
+    ;;
+  save:nature)
+    [ "$3" = 9d82vk ] || exit 2
+    printf 'save\n' >"$SMOKE_WALLPAPER_GATE/save.ready"
+    while [ ! -f "$SMOKE_WALLPAPER_GATE/save.release" ]; do sleep 0.1; done
+    printf '{"path":"%s"}\n' "$SMOKE_WALLPAPER_IMAGE"
+    ;;
+  *) exit 2 ;;
+esac
+SH
+chmod 700 "$tabbed_provider"
 
 # The blurred dark run keeps motion enabled so the stable-frame captures
 # exercise selection animations as well as their settled destinations.
@@ -422,6 +453,10 @@ run_harness() {
   SMOKE_LAUNCHER_THEME_JSON="$theme_json" \
   SMOKE_LAUNCHER_WALLPAPER_JSON="$wallpaper_json" \
   SMOKE_LAUNCHER_LIGHT_CONFIG="$light_config" \
+  SMOKE_WALLPAPER_TABS_JSON="$tabbed_json" \
+  SMOKE_WALLPAPER_PROVIDER="$tabbed_provider" \
+  SMOKE_WALLPAPER_GATE="$tabbed_gate" \
+  SMOKE_WALLPAPER_IMAGE="$fixtures/wallpaper-valid.png" \
   SMOKE_LAUNCHER_PINENTRY="$pinentry_bin" \
   SMOKE_LAUNCHER_FILE="$file_root/smoke-document.txt" \
   SMOKE_LAUNCHER_CATALOG_DIR="$catalog_root" \

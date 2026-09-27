@@ -9,13 +9,14 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Application, Button, Entry, Image, Label, Orientation, Picture, Window, gdk, gio, glib,
+    Align, Application, Button, Entry, Image, Label, Orientation, Picture, Spinner, Window, gdk,
+    gio, glib,
 };
 use serde::Deserialize;
 use topbar_core::config::Config;
@@ -49,6 +50,9 @@ const LIST_ROW_HEIGHT: i32 = 44;
 /// Title, optional message, search, actions, padding, and box spacing.
 /// This intentionally leaves some headroom for fractional-scale text.
 const CHOOSER_CHROME_HEIGHT: i32 = 210;
+/// The shared wallpaper title, tabs, presets, status, search, actions, error
+/// line, padding, and spacing (including controls hidden in the Local tab).
+const WALLPAPER_CHROME_HEIGHT: i32 = 330;
 const PREVIEW_MIN_HEIGHT: i32 = 160;
 const PREVIEW_MAX_HEIGHT: i32 = 240;
 /// A chooser only needs enough decoded images for its visible rows and
@@ -429,6 +433,138 @@ struct Candidate {
     palette: Option<Palette>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct WallpaperPreset {
+    id: String,
+    label: String,
+}
+
+#[derive(Deserialize)]
+struct WallpaperInput {
+    pool: Vec<Candidate>,
+    presets: Vec<WallpaperPreset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WallpaperPending {
+    Search { preset: String, generation: u64 },
+    Save { preset: String, generation: u64 },
+}
+
+#[derive(Deserialize)]
+struct SavedWallpaper {
+    path: PathBuf,
+}
+
+fn provider_command(executable: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let output = Command::new(executable)
+        .args(args)
+        .output()
+        .map_err(|error| format!("Could not run Wallhaven provider: {error}"))?;
+    if !output.status.success() {
+        let message = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "Wallhaven {} failed: {}",
+            args[0],
+            message.trim().chars().take(300).collect::<String>()
+        ));
+    }
+    if output.stdout.len() > MAX_INPUT_BYTES as usize {
+        return Err("Wallhaven provider response is too large".to_string());
+    }
+    Ok(output.stdout)
+}
+
+struct WallpaperState {
+    executable: PathBuf,
+    presets: Vec<WallpaperPreset>,
+    pool: Vec<Candidate>,
+    cached: HashMap<String, Vec<Candidate>>,
+    active: Option<String>,
+    last_preset: Option<usize>,
+    pending: Option<WallpaperPending>,
+    generation: u64,
+}
+
+impl WallpaperState {
+    fn switch(&mut self, preset: Option<&str>, rows: &mut Vec<Candidate>) -> bool {
+        if self.active.as_deref() == preset
+            || matches!(self.pending, Some(WallpaperPending::Save { .. }))
+        {
+            return false;
+        }
+        if let Some(old) = self.active.take() {
+            self.cached.insert(old, std::mem::take(rows));
+        } else {
+            self.pool = std::mem::take(rows);
+        }
+        if let Some(preset) = preset {
+            self.last_preset = self.presets.iter().position(|entry| entry.id == preset);
+        }
+        self.active = preset.map(str::to_owned);
+        *rows = if let Some(preset) = preset {
+            self.cached.remove(preset).unwrap_or_default()
+        } else {
+            std::mem::take(&mut self.pool)
+        };
+        if !matches!(
+            (&self.pending, preset),
+            (Some(WallpaperPending::Search { preset: searching, .. }), Some(next))
+                if searching == next
+        ) && preset.is_some()
+        {
+            self.pending = None;
+        }
+        self.generation += 1;
+        true
+    }
+    fn blocks_selection(&self) -> bool {
+        self.pending.is_some()
+            && (self.active.is_some()
+                || matches!(self.pending, Some(WallpaperPending::Save { .. })))
+    }
+
+    fn display_or_cache(&mut self, preset: &str, rows: Vec<Candidate>) -> Option<Vec<Candidate>> {
+        if self.active.as_deref() == Some(preset) {
+            Some(rows)
+        } else {
+            self.cached.insert(preset.to_string(), rows);
+            None
+        }
+    }
+
+    fn preferred_preset(&self) -> Option<&str> {
+        self.active.as_deref().or_else(|| {
+            self.last_preset
+                .and_then(|index| self.presets.get(index))
+                .or_else(|| self.presets.first())
+                .map(|entry| entry.id.as_str())
+        })
+    }
+
+    fn searching(&mut self) -> Option<(String, u64)> {
+        let preset = self.active.as_ref()?;
+        if self.pending.is_some() {
+            return None;
+        }
+        self.generation += 1;
+        let generation = self.generation;
+        self.pending = Some(WallpaperPending::Search {
+            preset: preset.clone(),
+            generation,
+        });
+        Some((preset.clone(), generation))
+    }
+
+    fn complete(&mut self, request: &WallpaperPending) -> bool {
+        if self.pending.as_ref() != Some(request) {
+            return false;
+        }
+        self.pending = None;
+        true
+    }
+}
+
 /// Theme palette metadata is intentionally permissive: callers may include
 /// all of their generated roles while the chooser uses the roles it can draw.
 #[derive(Debug, Clone, Deserialize)]
@@ -485,6 +621,7 @@ impl Palette {
 #[derive(Debug, Clone)]
 enum Outcome {
     Selected(String),
+    Saved(PathBuf),
     Cancelled,
     Failed(String),
 }
@@ -495,10 +632,14 @@ pub fn run(
     title: String,
     message: Option<String>,
     selected: Option<String>,
+    wallpaper_provider: Option<PathBuf>,
     config_path: Option<&Path>,
 ) -> ExitCode {
-    let candidates = match read_candidates() {
-        Ok(candidates) => candidates,
+    if wallpaper_provider.is_some() && layout != ChooseLayout::Wallpapers {
+        return fail("--wallpaper-provider requires --layout wallpapers");
+    }
+    let (candidates, presets) = match read_candidates(wallpaper_provider.is_some()) {
+        Ok(input) => input,
         Err(error) => return fail(error),
     };
 
@@ -531,6 +672,7 @@ pub fn run(
         .application_id("io.github.trevarj.topbar.chooser")
         .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
+    let provider_mode = wallpaper_provider.is_some();
     app.connect_activate({
         let outcome = outcome.clone();
         let live = live.clone();
@@ -566,6 +708,16 @@ pub fn run(
                 focused_output.as_deref(),
                 layout,
                 candidates.clone(),
+                wallpaper_provider.clone().map(|executable| WallpaperState {
+                    executable,
+                    presets: presets.clone(),
+                    pool: Vec::new(),
+                    cached: HashMap::new(),
+                    active: None,
+                    last_preset: None,
+                    pending: None,
+                    generation: 0,
+                }),
                 title.clone(),
                 message.clone(),
                 selected.clone(),
@@ -583,13 +735,20 @@ pub fn run(
     // both surfaces close prevents another standalone dialog appearing early.
     let status = app.run_with_args::<&str>(&[]);
     drop(input_lock);
-
     match outcome.borrow_mut().take() {
         Some(Outcome::Selected(id)) if status == glib::ExitCode::SUCCESS => {
-            println!("{id}");
+            if provider_mode {
+                println!("{}", serde_json::json!({"kind":"pool","id":id}));
+            } else {
+                println!("{id}");
+            }
             ExitCode::SUCCESS
         }
-        Some(Outcome::Selected(_)) => fail("chooser exited unsuccessfully"),
+        Some(Outcome::Saved(path)) if status == glib::ExitCode::SUCCESS => {
+            println!("{}", serde_json::json!({"kind":"saved","path":path}));
+            ExitCode::SUCCESS
+        }
+        Some(Outcome::Selected(_) | Outcome::Saved(_)) => fail("chooser exited unsuccessfully"),
         Some(Outcome::Cancelled) => ExitCode::from(1),
         Some(Outcome::Failed(error)) => fail(error),
         None if status == glib::ExitCode::SUCCESS => fail("chooser closed without a result"),
@@ -640,7 +799,7 @@ fn install_interaction_feedback(button: &Button) {
     button.add_controller(gesture);
 }
 
-fn read_candidates() -> Result<Vec<Candidate>, String> {
+fn read_candidates(provider: bool) -> Result<(Vec<Candidate>, Vec<WallpaperPreset>), String> {
     let mut bytes = Vec::new();
     io::stdin()
         .take(MAX_INPUT_BYTES + 1)
@@ -649,10 +808,38 @@ fn read_candidates() -> Result<Vec<Candidate>, String> {
     if bytes.len() as u64 > MAX_INPUT_BYTES {
         return Err(format!("chooser input exceeds {MAX_INPUT_BYTES} bytes"));
     }
-    let candidates: Vec<Candidate> = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("invalid chooser input: {error}"))?;
-    let mut ids = std::collections::HashSet::with_capacity(candidates.len());
-    for candidate in &candidates {
+    let (candidates, presets) = if provider {
+        let input: WallpaperInput = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("invalid wallpaper chooser input: {error}"))?;
+        if input.presets.is_empty()
+            || input.presets.iter().any(|preset| {
+                preset.id.is_empty() || !preset.id.bytes().all(|c| c.is_ascii_lowercase())
+            })
+            || input
+                .presets
+                .iter()
+                .map(|preset| &preset.id)
+                .collect::<HashSet<_>>()
+                .len()
+                != input.presets.len()
+        {
+            return Err("invalid wallpaper presets".to_string());
+        }
+        (input.pool, input.presets)
+    } else {
+        (
+            serde_json::from_slice(&bytes)
+                .map_err(|error| format!("invalid chooser input: {error}"))?,
+            Vec::new(),
+        )
+    };
+    validate_candidates(&candidates)?;
+    Ok((candidates, presets))
+}
+
+fn validate_candidates(candidates: &[Candidate]) -> Result<(), String> {
+    let mut ids = HashSet::with_capacity(candidates.len());
+    for candidate in candidates {
         if candidate.id.is_empty() {
             return Err("candidate ID must not be empty".to_string());
         }
@@ -666,7 +853,7 @@ fn read_candidates() -> Result<Vec<Candidate>, String> {
             return Err(format!("candidate ID is duplicated: {:?}", candidate.id));
         }
     }
-    Ok(candidates)
+    Ok(())
 }
 
 /// Filter with the same Unicode-aware matcher as launcher search.  A chooser
@@ -745,7 +932,16 @@ struct Chooser {
     root: gtk4::Box,
     container_motion: Animation,
     layout: ChooseLayout,
-    candidates: Vec<Candidate>,
+    candidates: RefCell<Vec<Candidate>>,
+    wallpaper: RefCell<Option<WallpaperState>>,
+    pool_tab: Button,
+    wallhaven_tab: Button,
+    preset_buttons: gtk4::Box,
+    status_row: gtk4::Box,
+    spinner: Spinner,
+    status: Label,
+    retry: Button,
+    cancel_button: Button,
     current: Option<String>,
     selected: RefCell<Option<String>>,
     search: Entry,
@@ -755,12 +951,12 @@ struct Chooser {
     scroll_retry_queued: Cell<bool>,
     results: gtk4::Box,
     preview: gtk4::Box,
-    preview_picture: RefCell<Option<(ThumbnailRequest, Picture, Image)>>,
+    preview_picture: Option<(Picture, Image, Label)>,
+    preview_request: RefCell<Option<ThumbnailRequest>>,
     row_widgets: RefCell<Vec<(usize, Button)>>,
     thumbnail_width: i32,
     thumbnail_height: i32,
     preview_width: i32,
-    preview_height: i32,
     preview_decode_height: i32,
     thumbnail_scheduler: RefCell<ThumbnailScheduler>,
     thumbnail_cache: RefCell<ThumbnailCache>,
@@ -778,6 +974,7 @@ impl Chooser {
         focused_output: Option<&str>,
         layout: ChooseLayout,
         candidates: Vec<Candidate>,
+        wallpaper: Option<WallpaperState>,
         title_text: String,
         message_text: Option<String>,
         current: Option<String>,
@@ -821,8 +1018,32 @@ impl Chooser {
         let chooser_width = desired_width.min(available_width.max(1));
         let thumbnail_width = (chooser_width / 3).clamp(96, THUMBNAIL_WIDTH);
         let thumbnail_height = thumbnail_width * 9 / 16;
-        let geometry = chooser_geometry(layout, thumbnail_height, available_height);
-        root.set_size_request(chooser_width, -1);
+        let geometry = chooser_geometry(
+            layout,
+            thumbnail_height,
+            available_height.saturating_sub(if wallpaper.is_some() { 110 } else { 0 }),
+        );
+        // Allow for the Wallhaven controls even when Local hides them. Keep
+        // the outer size fixed, but do not stretch a short chooser to fill the
+        // entire output: spare space belongs to the desktop, not empty results.
+        let scroll_height = if wallpaper.is_some() {
+            geometry.scroll_height.min(
+                available_height
+                    .saturating_sub(398 + geometry.preview_height.unwrap_or(0))
+                    .max(200),
+            )
+        } else {
+            geometry.scroll_height
+        };
+        root.set_size_request(
+            chooser_width,
+            if wallpaper.is_some() {
+                (scroll_height + geometry.preview_height.unwrap_or(0) + WALLPAPER_CHROME_HEIGHT)
+                    .min(available_height.saturating_sub(24))
+            } else {
+                -1
+            },
+        );
         root.set_margin_start(horizontal_margin);
         root.set_margin_end(horizontal_margin);
         root.set_margin_top(vertical_margin);
@@ -841,6 +1062,45 @@ impl Chooser {
             root.append(&message);
         }
 
+        let tabs = gtk4::Box::new(Orientation::Horizontal, 8);
+        let pool_tab = Button::with_label("Local");
+        let wallhaven_tab = Button::with_label("Wallhaven");
+        pool_tab.add_css_class(classes::DIALOG_BUTTON);
+        wallhaven_tab.add_css_class(classes::DIALOG_BUTTON);
+        tabs.append(&pool_tab);
+        tabs.append(&wallhaven_tab);
+        tabs.set_visible(wallpaper.is_some());
+        root.append(&tabs);
+        let preset_buttons = gtk4::Box::new(Orientation::Horizontal, 8);
+        preset_buttons.set_visible(false);
+        if let Some(wallpaper) = &wallpaper {
+            for preset in &wallpaper.presets {
+                let button = Button::with_label(&preset.label);
+                button.add_css_class(classes::DIALOG_BUTTON);
+                button.set_widget_name(&preset.id);
+                preset_buttons.append(&button);
+            }
+        }
+        root.append(&preset_buttons);
+
+        let status_row = gtk4::Box::new(Orientation::Horizontal, 8);
+        status_row.set_height_request(32);
+        status_row.set_visible(false);
+        let spinner = Spinner::new();
+        status_row.append(&spinner);
+        let status = Label::new(None);
+        status.set_xalign(0.0);
+        status.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        status.set_max_width_chars(32);
+        status.set_hexpand(true);
+        status.add_css_class(classes::CHOOSER_SUBTITLE);
+        status_row.append(&status);
+        let retry = Button::with_label("Retry");
+        retry.set_visible(false);
+        retry.add_css_class(classes::DIALOG_BUTTON);
+        status_row.append(&retry);
+        root.append(&status_row);
+
         let search = Entry::new();
         search.add_css_class(classes::CHOOSER_SEARCH);
         search.set_placeholder_text(Some("Search"));
@@ -851,11 +1111,11 @@ impl Chooser {
         results.add_css_class(classes::CHOOSER_RESULTS);
         let scroll = gtk4::ScrolledWindow::new();
         scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
-        // The non-overlay bar remains visible whenever the result set exceeds
-        // the four-row viewport, rather than fading over the last label.
+        // The non-overlay bar remains visible whenever results exceed
+        // the viewport rather than fading over the last label.
         scroll.set_overlay_scrolling(false);
-        scroll.set_min_content_height(geometry.scroll_height);
-        scroll.set_max_content_height(geometry.scroll_height);
+        scroll.set_min_content_height(scroll_height);
+        scroll.set_max_content_height(scroll_height);
         scroll.set_child(Some(&results));
         // Theme rows use GTK focus scrolling; other layouts retain selection scrolling.
         scroll
@@ -871,6 +1131,42 @@ impl Chooser {
         preview.add_css_class(classes::CHOOSER_PREVIEW);
         preview.set_visible(geometry.preview_height.is_some());
         root.append(&preview);
+        let (preview_width, preview_height, preview_decode_height) =
+            wallpaper_preview_dimensions(chooser_width, geometry.preview_height.unwrap_or(1));
+        let preview_picture =
+            if layout == ChooseLayout::Wallpapers && geometry.preview_height.is_some() {
+                let picture = Picture::new();
+                picture.add_css_class(classes::CHOOSER_PREVIEW_IMAGE);
+                picture.set_content_fit(gtk4::ContentFit::Cover);
+                picture.set_size_request(preview_width, preview_height);
+                picture.set_halign(Align::Fill);
+                picture.set_valign(Align::Fill);
+                picture.set_hexpand(true);
+                let placeholder = Image::from_icon_name("image-loading-symbolic");
+                placeholder.set_pixel_size(64);
+                placeholder.set_halign(Align::Center);
+                placeholder.set_valign(Align::Center);
+                let frame = gtk4::Overlay::new();
+                frame.set_size_request(preview_width, preview_height);
+                frame.set_halign(Align::Fill);
+                frame.set_hexpand(true);
+                let canvas = gtk4::Box::new(Orientation::Vertical, 0);
+                canvas.set_size_request(preview_width, preview_height);
+                frame.set_child(Some(&canvas));
+                frame.add_overlay(&picture);
+                frame.add_overlay(&placeholder);
+                preview.append(&frame);
+                let error = Label::new(None);
+                error.add_css_class(classes::CHOOSER_SUBTITLE);
+                error.set_max_width_chars(60);
+                error.set_xalign(0.0);
+                error.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+                error.set_height_request(24);
+                preview.append(&error);
+                Some((picture, placeholder, error))
+            } else {
+                None
+            };
 
         let actions = gtk4::Box::new(Orientation::Horizontal, 8);
         actions.add_css_class(classes::CHOOSER_ACTIONS);
@@ -897,9 +1193,6 @@ impl Chooser {
             .cloned()
             .or_else(|| candidates.first().map(|candidate| candidate.id.clone()));
         apply.set_sensitive(initial.is_some());
-        let (preview_width, preview_height, preview_decode_height) =
-            wallpaper_preview_dimensions(chooser_width, geometry.preview_height.unwrap_or(1));
-
         let chooser = Rc::new(Self {
             app,
             window,
@@ -908,7 +1201,16 @@ impl Chooser {
             root,
             container_motion,
             layout,
-            candidates,
+            candidates: RefCell::new(candidates),
+            wallpaper: RefCell::new(wallpaper),
+            pool_tab,
+            wallhaven_tab,
+            preset_buttons,
+            status_row,
+            spinner,
+            status,
+            retry,
+            cancel_button: cancel.clone(),
             current,
             selected: RefCell::new(initial),
             search,
@@ -918,12 +1220,12 @@ impl Chooser {
             scroll_retry_queued: Cell::new(false),
             results,
             preview,
-            preview_picture: RefCell::new(None),
+            preview_picture,
+            preview_request: RefCell::new(None),
             row_widgets: RefCell::new(Vec::new()),
             thumbnail_width,
             thumbnail_height,
             preview_width,
-            preview_height,
             preview_decode_height,
             thumbnail_scheduler: RefCell::new(ThumbnailScheduler::default()),
             thumbnail_cache: RefCell::new(ThumbnailCache::default()),
@@ -933,9 +1235,313 @@ impl Chooser {
             outcome,
         });
         chooser.wire(&cancel);
+        chooser.wire_wallpaper();
         chooser.cancel_if_monitor_disappears(display, monitor.as_ref());
         chooser.render();
         chooser
+    }
+
+    fn activate_wallhaven(self: &Rc<Self>) {
+        let preset = self
+            .wallpaper
+            .borrow()
+            .as_ref()
+            .and_then(WallpaperState::preferred_preset)
+            .map(str::to_owned);
+        if let Some(preset) = preset {
+            self.switch_wallpaper(Some(&preset));
+        }
+    }
+
+    fn wire_wallpaper(self: &Rc<Self>) {
+        if self.wallpaper.borrow().is_none() {
+            return;
+        }
+        self.pool_tab.connect_clicked({
+            let weak = Rc::downgrade(self);
+            move |_| {
+                if let Some(chooser) = weak.upgrade() {
+                    chooser.switch_wallpaper(None);
+                }
+            }
+        });
+        self.wallhaven_tab.connect_clicked({
+            let weak = Rc::downgrade(self);
+            move |_| {
+                if let Some(chooser) = weak.upgrade() {
+                    chooser.activate_wallhaven();
+                }
+            }
+        });
+        let mut child = self.preset_buttons.first_child();
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            let button = widget.downcast::<Button>().expect("preset button");
+            let preset = button.widget_name().to_string();
+            button.connect_clicked({
+                let weak = Rc::downgrade(self);
+                move |_| {
+                    if let Some(chooser) = weak.upgrade() {
+                        chooser.switch_wallpaper(Some(&preset));
+                    }
+                }
+            });
+        }
+        self.retry.connect_clicked({
+            let weak = Rc::downgrade(self);
+            move |_| {
+                if let Some(chooser) = weak.upgrade() {
+                    if chooser.candidates.borrow().is_empty() {
+                        chooser.start_wallpaper_search();
+                    } else {
+                        chooser.accept();
+                    }
+                }
+            }
+        });
+        self.update_wallpaper_controls();
+    }
+
+    fn update_wallpaper_controls(self: &Rc<Self>) {
+        let wallpaper_state = self.wallpaper.borrow();
+        let Some(state) = wallpaper_state.as_ref() else {
+            return;
+        };
+        let active = state.active.as_deref();
+        let saving = matches!(state.pending, Some(WallpaperPending::Save { .. }));
+        self.pool_tab.set_sensitive(!saving);
+        self.wallhaven_tab.set_sensitive(!saving);
+        self.cancel_button.set_sensitive(!saving);
+        self.search.set_sensitive(!saving);
+        self.pool_tab
+            .remove_css_class(classes::DIALOG_BUTTON_PRIMARY);
+        self.wallhaven_tab
+            .remove_css_class(classes::DIALOG_BUTTON_PRIMARY);
+        if active.is_some() {
+            self.wallhaven_tab
+                .add_css_class(classes::DIALOG_BUTTON_PRIMARY);
+        } else {
+            self.pool_tab.add_css_class(classes::DIALOG_BUTTON_PRIMARY);
+        }
+        self.preset_buttons.set_visible(active.is_some());
+        let mut child = self.preset_buttons.first_child();
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            let button = widget.downcast::<Button>().expect("preset button");
+            button.set_sensitive(active.is_some() && !saving);
+            button.remove_css_class(classes::DIALOG_BUTTON_PRIMARY);
+            if active == Some(button.widget_name().as_str()) {
+                button.add_css_class(classes::DIALOG_BUTTON_PRIMARY);
+            }
+        }
+        if state.blocks_selection() {
+            self.spinner.set_visible(true);
+            self.spinner.start();
+            self.status.set_tooltip_text(None);
+            self.status.set_label(if saving {
+                "Saving selected wallpaper…"
+            } else {
+                "Searching Wallhaven…"
+            });
+            self.retry.set_visible(false);
+        } else {
+            self.spinner.stop();
+            self.spinner.set_visible(false);
+        }
+        self.status_row.set_visible(
+            active.is_some() && (state.blocks_selection() || !self.status.label().is_empty()),
+        );
+        drop(wallpaper_state);
+        self.update_apply_sensitivity();
+    }
+
+    fn switch_wallpaper(self: &Rc<Self>, preset: Option<&str>) {
+        let changed = {
+            let mut state = self.wallpaper.borrow_mut();
+            let Some(state) = state.as_mut() else { return };
+            if preset.is_some_and(|id| !state.presets.iter().any(|item| item.id == id)) {
+                return;
+            }
+            state.switch(preset, &mut self.candidates.borrow_mut())
+        };
+        if !changed {
+            return;
+        }
+        self.thumbnail_scheduler.borrow_mut().clear();
+        self.status.set_label("");
+        self.status.set_tooltip_text(None);
+        self.retry.set_visible(false);
+        *self.selected.borrow_mut() = None;
+        self.ensure_visible_selection();
+        self.update_wallpaper_controls();
+        self.render();
+        if preset.is_some() && self.candidates.borrow().is_empty() {
+            self.start_wallpaper_search();
+        }
+    }
+
+    fn start_wallpaper_search(self: &Rc<Self>) {
+        let (executable, preset, generation) = {
+            let mut state = self.wallpaper.borrow_mut();
+            let Some(state) = state.as_mut() else { return };
+            let Some((preset, generation)) = state.searching() else {
+                return;
+            };
+            (state.executable.clone(), preset, generation)
+        };
+        self.retry.set_visible(false);
+        self.update_wallpaper_controls();
+        self.render();
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let request_preset = preset.clone();
+            let result = gio::spawn_blocking(move || {
+                provider_command(&executable, &["search", &request_preset])
+            })
+            .await
+            .map_err(|error| format!("Wallhaven worker failed: {error:?}"))
+            .and_then(|result| result)
+            .and_then(|bytes| {
+                serde_json::from_slice::<Vec<Candidate>>(&bytes)
+                    .map_err(|error| format!("Invalid Wallhaven results: {error}"))
+            })
+            .and_then(|rows| {
+                validate_candidates(&rows)?;
+                if rows
+                    .iter()
+                    .any(|row| !row.preview.as_deref().is_some_and(Path::is_absolute))
+                {
+                    return Err("Wallhaven returned a non-local preview".to_string());
+                }
+                Ok(rows)
+            });
+            if let Some(chooser) = weak.upgrade() {
+                chooser.wallpaper_search_finished(&preset, generation, result);
+            }
+        });
+    }
+
+    fn wallpaper_search_finished(
+        self: &Rc<Self>,
+        preset: &str,
+        generation: u64,
+        result: Result<Vec<Candidate>, String>,
+    ) {
+        let mut state = self.wallpaper.borrow_mut();
+        if self.outcome.borrow().is_some()
+            || !state.as_mut().is_some_and(|state| {
+                state.complete(&WallpaperPending::Search {
+                    preset: preset.to_string(),
+                    generation,
+                })
+            })
+        {
+            return;
+        }
+        let active = state
+            .as_ref()
+            .is_some_and(|state| state.active.as_deref() == Some(preset));
+        let result = match result {
+            Ok(rows) if !rows.is_empty() => state
+                .as_mut()
+                .expect("wallpaper state")
+                .display_or_cache(preset, rows)
+                .map(Ok),
+            Ok(_) if active => Some(Err("No Wallhaven results for this preset".to_string())),
+            Err(error) if active => Some(Err(error)),
+            _ => None,
+        };
+        drop(state);
+        if let Some(result) = result {
+            match result {
+                Ok(rows) => {
+                    *self.candidates.borrow_mut() = rows;
+                    self.status.set_label("");
+                    self.status.set_tooltip_text(None);
+                    self.retry.set_visible(false);
+                    *self.selected.borrow_mut() = None;
+                    self.ensure_visible_selection();
+                    self.render();
+                }
+                Err(error) => self.wallpaper_error(error),
+            }
+        }
+        self.update_wallpaper_controls();
+    }
+
+    fn wallpaper_error(self: &Rc<Self>, error: String) {
+        self.status.set_label(&error);
+        self.status.set_tooltip_text(Some(&error));
+        self.retry.set_visible(true);
+        self.status_row.set_visible(true);
+    }
+
+    fn save_wallpaper(self: &Rc<Self>, preset: String, id: String) {
+        let (executable, generation) = {
+            let mut state = self.wallpaper.borrow_mut();
+            let state = state.as_mut().expect("wallpaper state");
+            state.generation += 1;
+            let generation = state.generation;
+            state.pending = Some(WallpaperPending::Save {
+                preset: preset.clone(),
+                generation,
+            });
+            (state.executable.clone(), generation)
+        };
+        self.retry.set_visible(false);
+        self.update_wallpaper_controls();
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let request_preset = preset.clone();
+            let result = gio::spawn_blocking(move || {
+                provider_command(&executable, &["save", &request_preset, &id])
+            })
+            .await
+            .map_err(|error| format!("Wallhaven worker failed: {error:?}"))
+            .and_then(|result| result)
+            .and_then(|bytes| {
+                serde_json::from_slice::<SavedWallpaper>(&bytes)
+                    .map_err(|error| format!("Invalid Wallhaven save response: {error}"))
+            })
+            .and_then(|result| {
+                if result.path.is_absolute() {
+                    Ok(result.path)
+                } else {
+                    Err("Wallhaven returned a non-local saved path".to_string())
+                }
+            });
+            if let Some(chooser) = weak.upgrade() {
+                chooser.wallpaper_save_finished(&preset, generation, result);
+            }
+        });
+    }
+
+    fn wallpaper_save_finished(
+        self: &Rc<Self>,
+        preset: &str,
+        generation: u64,
+        result: Result<PathBuf, String>,
+    ) {
+        let mut state = self.wallpaper.borrow_mut();
+        if self.outcome.borrow().is_some()
+            || !state.as_mut().is_some_and(|state| {
+                state.complete(&WallpaperPending::Save {
+                    preset: preset.to_string(),
+                    generation,
+                })
+            })
+        {
+            return;
+        }
+        drop(state);
+        match result {
+            Ok(path) => self.finish(Outcome::Saved(path)),
+            Err(error) => {
+                self.wallpaper_error(error);
+                self.retry.set_sensitive(self.selection_is_ready());
+                self.update_wallpaper_controls();
+            }
+        }
     }
 
     fn wire(self: &Rc<Self>, cancel: &Button) {
@@ -992,10 +1598,25 @@ impl Chooser {
         keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
         keys.connect_key_pressed({
             let weak = Rc::downgrade(self);
-            move |_, key, _, _| {
+            move |_, key, _, modifiers| {
                 let Some(chooser) = weak.upgrade() else {
                     return glib::Propagation::Proceed;
                 };
+                if matches!(key, gdk::Key::Tab | gdk::Key::ISO_Left_Tab)
+                    && modifiers.contains(gdk::ModifierType::CONTROL_MASK)
+                {
+                    let on_wallhaven = chooser
+                        .wallpaper
+                        .borrow()
+                        .as_ref()
+                        .map(|state| state.active.is_some());
+                    match on_wallhaven {
+                        Some(true) => chooser.switch_wallpaper(None),
+                        Some(false) => chooser.activate_wallhaven(),
+                        None => return glib::Propagation::Proceed,
+                    }
+                    return glib::Propagation::Stop;
+                }
                 match key {
                     gdk::Key::Escape => chooser.cancel(),
                     gdk::Key::Up => chooser.move_selection(-1),
@@ -1083,7 +1704,7 @@ impl Chooser {
     }
 
     fn query_indices(&self) -> Vec<usize> {
-        matching_indices(&self.candidates, self.search.text().trim())
+        matching_indices(&self.candidates.borrow(), self.search.text().trim())
     }
 
     fn ensure_visible_selection(self: &Rc<Self>) {
@@ -1092,12 +1713,12 @@ impl Chooser {
         if selected.as_ref().is_some_and(|id| {
             visible
                 .iter()
-                .any(|&index| self.candidates[index].id.as_str() == id.as_str())
+                .any(|&index| self.candidates.borrow()[index].id.as_str() == id.as_str())
         }) {
             return;
         }
         drop(selected);
-        *self.selected.borrow_mut() = retained_selection(&self.candidates, &visible, None);
+        *self.selected.borrow_mut() = retained_selection(&self.candidates.borrow(), &visible, None);
         self.update_apply_sensitivity();
     }
 
@@ -1112,7 +1733,7 @@ impl Chooser {
             .and_then(|id| {
                 visible
                     .iter()
-                    .position(|&index| self.candidates[index].id.as_str() == id.as_str())
+                    .position(|&index| self.candidates.borrow()[index].id.as_str() == id.as_str())
             })
             .unwrap_or(0);
         drop(selected);
@@ -1162,12 +1783,12 @@ impl Chooser {
             let rows = self.row_widgets.borrow();
             if let Some((_, row)) = rows
                 .iter()
-                .find(|(candidate, _)| self.candidates[*candidate].id == previous)
+                .find(|(candidate, _)| self.candidates.borrow()[*candidate].id == previous)
             {
                 row.remove_css_class(classes::CHOOSER_RESULT_SELECTED);
             }
         }
-        let id = self.candidates[index].id.clone();
+        let id = self.candidates.borrow()[index].id.clone();
         if let Some((_, row)) = self
             .row_widgets
             .borrow()
@@ -1183,6 +1804,7 @@ impl Chooser {
             .as_deref()
             .and_then(|id| {
                 self.candidates
+                    .borrow()
                     .iter()
                     .find(|candidate| candidate.id == id)
                     .and_then(|candidate| candidate.preview.clone())
@@ -1218,7 +1840,7 @@ impl Chooser {
         let rows = self.row_widgets.borrow();
         let Some((_, row)) = rows
             .iter()
-            .find(|(index, _)| self.candidates[*index].id.as_str() == selected)
+            .find(|(index, _)| self.candidates.borrow()[*index].id.as_str() == selected)
         else {
             return true;
         };
@@ -1252,14 +1874,39 @@ impl Chooser {
     }
 
     fn accept(self: &Rc<Self>) {
-        if self.selection_is_ready()
-            && let Some(id) = self.selected.borrow().clone()
+        if !self.selection_is_ready()
+            || self
+                .wallpaper
+                .borrow()
+                .as_ref()
+                .is_some_and(WallpaperState::blocks_selection)
         {
+            return;
+        }
+        let Some(id) = self.selected.borrow().clone() else {
+            return;
+        };
+        let preset = self
+            .wallpaper
+            .borrow()
+            .as_ref()
+            .and_then(|state| state.active.clone());
+        if let Some(preset) = preset {
+            self.save_wallpaper(preset, id);
+        } else {
             self.finish(Outcome::Selected(id));
         }
     }
 
     fn cancel(&self) {
+        if self
+            .wallpaper
+            .borrow()
+            .as_ref()
+            .is_some_and(|state| matches!(state.pending, Some(WallpaperPending::Save { .. })))
+        {
+            return;
+        }
         self.finish(Outcome::Cancelled);
     }
 
@@ -1287,7 +1934,16 @@ impl Chooser {
         }
         let visible = self.query_indices();
         if visible.is_empty() {
-            let empty = Label::new(Some("No matching choices"));
+            let empty = Label::new(Some(
+                if self.wallpaper.borrow().as_ref().is_some_and(|state| {
+                    state.active.is_some()
+                        && matches!(state.pending, Some(WallpaperPending::Search { .. }))
+                }) {
+                    "Searching Wallhaven…"
+                } else {
+                    "No matching choices"
+                },
+            ));
             empty.add_css_class(classes::CHOOSER_EMPTY);
             empty.set_xalign(0.0);
             self.results.append(&empty);
@@ -1304,7 +1960,8 @@ impl Chooser {
     }
 
     fn row(self: &Rc<Self>, index: usize) -> Button {
-        let candidate = &self.candidates[index];
+        let candidates = self.candidates.borrow();
+        let candidate = &candidates[index];
         let row = Button::new();
         row.add_css_class(classes::CHOOSER_RESULT);
         if self.selected.borrow().as_deref() == Some(candidate.id.as_str()) {
@@ -1338,12 +1995,18 @@ impl Chooser {
         label.add_css_class(classes::CHOOSER_LABEL);
         label.set_xalign(0.0);
         label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        if self.layout == ChooseLayout::Wallpapers {
+            label.set_max_width_chars(48);
+        }
         text.append(&label);
         if let Some(subtitle) = candidate.subtitle.as_deref() {
             let subtitle = Label::new(Some(subtitle));
             subtitle.add_css_class(classes::CHOOSER_SUBTITLE);
             subtitle.set_xalign(0.0);
             subtitle.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+            if self.layout == ChooseLayout::Wallpapers {
+                subtitle.set_max_width_chars(48);
+            }
             text.append(&subtitle);
         }
         if let Some(mode) = candidate.palette.as_ref().and_then(Palette::mode) {
@@ -1356,6 +2019,8 @@ impl Chooser {
             let unavailable = Label::new(Some("Preview unavailable"));
             unavailable.add_css_class(classes::CHOOSER_SUBTITLE);
             unavailable.set_xalign(0.0);
+            unavailable.set_max_width_chars(48);
+            unavailable.set_ellipsize(gtk4::pango::EllipsizeMode::End);
             unavailable.set_visible(false);
             if let Some(request) = request.as_ref() {
                 self.thumbnail_errors
@@ -1389,74 +2054,49 @@ impl Chooser {
     }
 
     fn render_preview(self: &Rc<Self>) {
-        self.preview_picture.borrow_mut().take();
-        while let Some(child) = self.preview.first_child() {
-            self.preview.remove(&child);
+        if self.layout != ChooseLayout::Wallpapers {
+            while let Some(child) = self.preview.first_child() {
+                self.preview.remove(&child);
+            }
         }
         let selected = self.selected.borrow();
-        let Some(id) = selected.as_deref() else {
-            return;
-        };
-        let Some(candidate) = self
-            .candidates
-            .iter()
-            .find(|candidate| candidate.id.as_str() == id)
-        else {
-            return;
-        };
-        drop(selected);
+        let candidates = self.candidates.borrow();
+        let candidate = selected
+            .as_deref()
+            .and_then(|id| candidates.iter().find(|candidate| candidate.id == id));
         match self.layout {
             ChooseLayout::Wallpapers => {
-                let request = candidate.preview.as_deref().map(|path| {
-                    self.thumbnail_request(path, self.preview_width, self.preview_decode_height)
+                let request = candidate.and_then(|candidate| {
+                    candidate.preview.as_deref().map(|path| {
+                        self.thumbnail_request(path, self.preview_width, self.preview_decode_height)
+                    })
                 });
-                let picture = Picture::new();
-                picture.add_css_class(classes::CHOOSER_PREVIEW_IMAGE);
-                picture.set_content_fit(gtk4::ContentFit::Cover);
-                picture.set_size_request(self.preview_width, self.preview_height);
-                picture.set_halign(Align::Fill);
-                picture.set_hexpand(true);
-                let placeholder = Image::from_icon_name("image-loading-symbolic");
-                placeholder.set_pixel_size(64);
-                placeholder.set_halign(Align::Center);
-                placeholder.set_valign(Align::Center);
-                let frame = gtk4::Overlay::new();
-                frame.set_size_request(self.preview_width, self.preview_height);
-                frame.set_halign(Align::Fill);
-                frame.set_hexpand(true);
-                frame.set_child(Some(&picture));
-                frame.add_overlay(&placeholder);
-                self.preview.append(&frame);
-                let error = Label::new(None);
-                error.add_css_class(classes::CHOOSER_SUBTITLE);
-                error.set_xalign(0.0);
-                error.set_wrap(true);
-                error.set_visible(false);
-                if let Some(request) = request.as_ref() {
-                    self.thumbnail_errors
-                        .borrow_mut()
-                        .entry(request.clone())
-                        .or_default()
-                        .push(error.downgrade());
-                    let view = self.thumbnail_view(request);
-                    Self::set_preview_view(&view, &picture, &placeholder);
-                    *self.preview_picture.borrow_mut() =
-                        Some((request.clone(), picture, placeholder));
-                    if let ThumbnailView::Failed(message) = view {
-                        error.set_label(&format!("Preview unavailable: {message}"));
-                        error.set_visible(true);
+                if let Some((picture, placeholder, error)) = self.preview_picture.as_ref() {
+                    if let Some(request) = request.as_ref() {
+                        Self::set_preview_view(
+                            &self.thumbnail_view(request),
+                            picture,
+                            placeholder,
+                            error,
+                        );
+                    } else {
+                        picture.set_paintable(None::<&gdk::Texture>);
+                        placeholder.set_visible(false);
+                        error.set_label("");
                     }
                 }
-                self.preview.append(&error);
+                *self.preview_request.borrow_mut() = request;
             }
             ChooseLayout::Themes => {
-                let sample = gtk4::Box::new(Orientation::Vertical, 4);
-                sample.add_css_class(classes::CHOOSER_THEME_SAMPLE);
-                let heading = Label::new(Some(&candidate.label));
-                heading.set_xalign(0.0);
-                sample.append(&heading);
-                sample.append(&palette_swatch(candidate.palette.as_ref()));
-                self.preview.append(&sample);
+                if let Some(candidate) = candidate {
+                    let sample = gtk4::Box::new(Orientation::Vertical, 4);
+                    sample.add_css_class(classes::CHOOSER_THEME_SAMPLE);
+                    let heading = Label::new(Some(&candidate.label));
+                    heading.set_xalign(0.0);
+                    sample.append(&heading);
+                    sample.append(&palette_swatch(candidate.palette.as_ref()));
+                    self.preview.append(&sample);
+                }
             }
             ChooseLayout::List => {}
         }
@@ -1474,7 +2114,8 @@ impl Chooser {
         if self.layout != ChooseLayout::Wallpapers {
             return true;
         }
-        let Some(candidate) = self.candidates.iter().find(|candidate| candidate.id == id) else {
+        let candidates = self.candidates.borrow();
+        let Some(candidate) = candidates.iter().find(|candidate| candidate.id == id) else {
             return false;
         };
         candidate.preview.as_deref().is_some_and(|path| {
@@ -1485,7 +2126,13 @@ impl Chooser {
     }
 
     fn update_apply_sensitivity(self: &Rc<Self>) {
-        self.apply.set_sensitive(self.selection_is_ready());
+        let pending = self
+            .wallpaper
+            .borrow()
+            .as_ref()
+            .is_some_and(WallpaperState::blocks_selection);
+        self.apply
+            .set_sensitive(!pending && self.selection_is_ready());
     }
 
     fn thumbnail_image(self: &Rc<Self>, request: Option<&ThumbnailRequest>) -> Image {
@@ -1551,12 +2198,13 @@ impl Chooser {
         if let Some(id) = self.selected.borrow().as_deref()
             && let Some(path) = self
                 .candidates
+                .borrow()
                 .iter()
                 .find(|candidate| candidate.id == id)
-                .and_then(|candidate| candidate.preview.as_deref())
+                .and_then(|candidate| candidate.preview.clone())
         {
             interests.push(self.thumbnail_request(
-                path,
+                &path,
                 self.preview_width,
                 self.preview_decode_height,
             ));
@@ -1574,12 +2222,13 @@ impl Chooser {
             .as_deref()
             .and_then(|id| {
                 self.candidates
+                    .borrow()
                     .iter()
                     .find(|candidate| candidate.id == id)
-                    .and_then(|candidate| candidate.preview.as_deref())
+                    .and_then(|candidate| candidate.preview.clone())
             })
             .map(|path| {
-                self.thumbnail_request(path, self.preview_width, self.preview_decode_height)
+                self.thumbnail_request(&path, self.preview_width, self.preview_decode_height)
             })
             .and_then(
                 |request| match self.thumbnail_scheduler.borrow().state(&request) {
@@ -1609,9 +2258,12 @@ impl Chooser {
             };
             let row_start = f64::from(bounds.y());
             let row_end = row_start + f64::from(bounds.height());
-            let request = self.candidates[*index].preview.as_deref().map(|path| {
-                self.thumbnail_request(path, self.thumbnail_width, self.thumbnail_height)
-            });
+            let request = self.candidates.borrow()[*index]
+                .preview
+                .as_deref()
+                .map(|path| {
+                    self.thumbnail_request(path, self.thumbnail_width, self.thumbnail_height)
+                });
             let Some(request) = request else {
                 continue;
             };
@@ -1626,9 +2278,12 @@ impl Chooser {
         // precise geometry.
         if viewport.is_empty() && overscan.is_empty() {
             overscan.extend(rows.iter().filter_map(|(index, _)| {
-                self.candidates[*index].preview.as_deref().map(|path| {
-                    self.thumbnail_request(path, self.thumbnail_width, self.thumbnail_height)
-                })
+                self.candidates.borrow()[*index]
+                    .preview
+                    .as_deref()
+                    .map(|path| {
+                        self.thumbnail_request(path, self.thumbnail_width, self.thumbnail_height)
+                    })
             }));
         }
         bounded_row_interests(viewport.into_iter().chain(overscan))
@@ -1781,10 +2436,10 @@ impl Chooser {
 
     fn update_thumbnail_widgets(&self, request: &ThumbnailRequest) {
         let view = self.thumbnail_view(request);
-        if let Some((current, picture, placeholder)) = self.preview_picture.borrow().as_ref()
-            && current == request
+        if self.preview_request.borrow().as_ref() == Some(request)
+            && let Some((picture, placeholder, error)) = self.preview_picture.as_ref()
         {
-            Self::set_preview_view(&view, picture, placeholder);
+            Self::set_preview_view(&view, picture, placeholder, error);
         }
         if let Some(images) = self.thumbnail_images.borrow_mut().get_mut(request) {
             images.retain(|image| {
@@ -1807,29 +2462,42 @@ impl Chooser {
                 match &view {
                     ThumbnailView::Failed(error) => {
                         label.set_label(&format!("Preview unavailable: {error}"));
+                        label.set_tooltip_text(Some(error));
                         label.set_visible(true);
                     }
-                    ThumbnailView::Loading | ThumbnailView::Ready(_) => label.set_visible(false),
+                    ThumbnailView::Loading | ThumbnailView::Ready(_) => {
+                        label.set_visible(false);
+                        label.set_tooltip_text(None);
+                    }
                 }
                 true
             });
         }
     }
 
-    fn set_preview_view(view: &ThumbnailView, picture: &Picture, placeholder: &Image) {
+    fn set_preview_view(
+        view: &ThumbnailView,
+        picture: &Picture,
+        placeholder: &Image,
+        error: &Label,
+    ) {
         match view {
             ThumbnailView::Ready(texture) => {
                 picture.set_paintable(Some(texture));
                 placeholder.set_visible(false);
+                error.set_label("");
             }
-            ThumbnailView::Loading | ThumbnailView::Failed(_) => {
-                picture.set_paintable(None::<&gdk::Texture>);
-                placeholder.set_icon_name(Some(if matches!(view, ThumbnailView::Loading) {
-                    "image-loading-symbolic"
-                } else {
-                    "image-missing-symbolic"
-                }));
+            ThumbnailView::Loading => {
+                // Keep the last painted frame until the next thumbnail is ready.
+                placeholder.set_icon_name(Some("image-loading-symbolic"));
                 placeholder.set_visible(true);
+                error.set_label("");
+            }
+            ThumbnailView::Failed(message) => {
+                picture.set_paintable(None::<&gdk::Texture>);
+                placeholder.set_icon_name(Some("image-missing-symbolic"));
+                placeholder.set_visible(true);
+                error.set_label(&format!("Preview unavailable: {message}"));
             }
         }
     }
@@ -2395,5 +3063,128 @@ mod tests {
                 ThumbnailStableState::Failed(_)
             ))
         ));
+    }
+    #[test]
+    fn wallpaper_tabs_defer_search_cache_results_and_ignore_late_searches() {
+        let mut state = WallpaperState {
+            executable: PathBuf::from("/provider"),
+            presets: vec![
+                WallpaperPreset {
+                    id: "nature".into(),
+                    label: "Nature".into(),
+                },
+                WallpaperPreset {
+                    id: "mountains".into(),
+                    label: "Mountains".into(),
+                },
+            ],
+            pool: Vec::new(),
+            cached: HashMap::new(),
+            active: None,
+            last_preset: None,
+            pending: None,
+            generation: 0,
+        };
+        let mut rows = vec![candidate("pool", "Local", None)];
+        assert_eq!(state.searching(), None, "Pool never searches");
+        assert!(state.switch(Some("nature"), &mut rows));
+        assert!(rows.is_empty());
+        let (_, first) = state
+            .searching()
+            .expect("first Wallhaven activation searches");
+        assert!(state.blocks_selection());
+        assert!(
+            state.switch(None, &mut rows),
+            "Pool remains accessible during search"
+        );
+        assert_eq!(rows[0].id, "pool");
+        assert!(!state.blocks_selection(), "Pool stays actionable");
+        assert!(matches!(
+            state.pending,
+            Some(WallpaperPending::Search { .. })
+        ));
+        assert!(state.switch(Some("nature"), &mut rows));
+        assert!(rows.is_empty());
+        assert!(
+            state.blocks_selection(),
+            "returning to a pending search shows the spinner"
+        );
+        assert_eq!(
+            state.searching(),
+            None,
+            "reentry must not launch a duplicate"
+        );
+        assert!(state.switch(None, &mut rows));
+        assert!(state.complete(&WallpaperPending::Search {
+            preset: "nature".into(),
+            generation: first
+        }));
+        assert!(
+            state
+                .display_or_cache("nature", vec![candidate("9d82vk", "Fetched", None)])
+                .is_none()
+        );
+        assert_eq!(
+            rows[0].id, "pool",
+            "completed search must not replace Pool rows"
+        );
+        assert!(!state.blocks_selection());
+        assert!(state.switch(Some("nature"), &mut rows));
+        assert_eq!(rows[0].id, "9d82vk", "return uses cached results");
+        assert!(!state.blocks_selection());
+        state.pending = Some(WallpaperPending::Save {
+            preset: "nature".into(),
+            generation: first,
+        });
+        assert!(
+            !state.switch(None, &mut rows),
+            "save disables Pool and Cancel until complete"
+        );
+        assert!(
+            matches!(state.pending, Some(WallpaperPending::Save { .. })),
+            "save keeps its spinner while the provider is running"
+        );
+        assert!(state.complete(&WallpaperPending::Save {
+            preset: "nature".into(),
+            generation: first
+        }));
+        assert_eq!(state.active.as_deref(), Some("nature"));
+        assert!(state.switch(Some("mountains"), &mut rows));
+        assert!(rows.is_empty());
+        let (_, superseded) = state.searching().expect("new preset searches");
+        assert!(state.switch(Some("nature"), &mut rows));
+        assert_eq!(rows[0].id, "9d82vk");
+        assert!(!state.complete(&WallpaperPending::Search {
+            preset: "mountains".into(),
+            generation: superseded
+        }));
+        assert_eq!(
+            rows[0].id, "9d82vk",
+            "stale search cannot clobber current rows"
+        );
+        assert!(state.switch(Some("mountains"), &mut rows));
+        let (_, current) = state
+            .searching()
+            .expect("superseded preset searches on reentry");
+        assert!(!state.complete(&WallpaperPending::Search {
+            preset: "mountains".into(),
+            generation: superseded
+        }));
+        assert!(
+            state.blocks_selection(),
+            "stale completion cannot hide the spinner"
+        );
+        assert!(state.complete(&WallpaperPending::Search {
+            preset: "mountains".into(),
+            generation: current
+        }));
+        rows = state
+            .display_or_cache("mountains", vec![candidate("mountain", "Mountain", None)])
+            .expect("active preset displays results");
+        assert!(state.switch(None, &mut rows));
+        assert_eq!(state.preferred_preset(), Some("mountains"));
+        let preset = state.preferred_preset().unwrap().to_owned();
+        assert!(state.switch(Some(&preset), &mut rows));
+        assert_eq!(rows[0].id, "mountain", "last preset uses cached results");
     }
 }
