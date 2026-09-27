@@ -277,12 +277,17 @@ impl ToastSurface {
                     stack.remove(&leaving.slide);
                 }
                 cards.borrow_mut().retain(|other| !other.same(&leaving));
-                // Nothing left to show: the window unmaps on the next render,
-                // which the removal above has already made accurate.
-                if cards.borrow().is_empty()
-                    && let Some(window) = stack.root().and_downcast::<Window>()
-                {
-                    window.set_visible(false);
+                // The previous render sized the window while this departing
+                // banner still occupied a slot. Resize after removing it so
+                // the remaining stack (and the blur's resize watcher) shrinks.
+                if let Some(window) = stack.root().and_downcast::<Window>() {
+                    if cards.borrow().is_empty() {
+                        window.set_visible(false);
+                    } else {
+                        let width = WIDTH + 2 * SHADOW_MARGIN;
+                        let (_, height, _, _) = stack.measure(Orientation::Vertical, width);
+                        window.set_default_size(width, height.max(1));
+                    }
                 }
             });
         }

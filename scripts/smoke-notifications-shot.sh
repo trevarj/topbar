@@ -96,6 +96,19 @@ print(*found[index - 1])
 PY
 }
 
+# The mapped banner surface's height in the latest layout dump.
+toast_height() {
+  python3 - "$art/panel.log" <<'PY'
+import re, sys
+text = open(sys.argv[1], errors="replace").read()
+block = text[text.rfind("ui-dump: begin"):]
+match = re.search(r'ui-dump: surface "topbar-toast" -?\d+ -?\d+ \d+ (\d+)', block)
+if not match:
+    sys.exit("no mapped banner surface in the last dump")
+print(match.group(1))
+PY
+}
+
 # How many controls in the last dump match a pattern.
 count_of() {
   tally=0
@@ -440,11 +453,28 @@ case "$scenario" in
     check click_on toast-close
     check assert_unmapped topbar-toast "the close button dismissed it"
 
-    echo "--- three at once, and a critical one that will not go away"
+    echo "--- dismissing the first of two banners shrinks the mapped surface"
     notify -a Telegram -i chat-message-new-symbolic -t 60000 "Ada Lovelace" "one"
     notify -a Fractal -i mail-unread-symbolic -t 60000 "#topbar" "two"
+    check shot 05-two topbar-toast
+    check dump
+    before=$(toast_height) || { fail=1; before=0; }
+    check hover_on "GtkBox vertical toast" 2
+    check click_on toast-close 2
+    check dump
+    after=$(toast_height) || { fail=1; after=0; }
+    remaining=$(count_of "GtkBox vertical toast")
+    if [ "$remaining" -ne 1 ] || [ "$after" -ge "$before" ]; then
+      echo "smoke-notifications: dismissed one of two banners but the surface stayed ${before}px high (${after}px with $remaining left)" >&2
+      fail=1
+    fi
+    pointer_park
+    check shot 05-one topbar-toast
+
+    echo "--- three at once, and a critical one that will not go away"
+    notify -a Telegram -i chat-message-new-symbolic -t 60000 "Grace Hopper" "three"
     notify -a "Software Updater" -i software-update-available-symbolic -t 60000 \
-      "Updates" "three"
+      "Updates" "four"
     check shot 05-stack topbar-toast
     dump
     stacked=$(count_of "GtkBox vertical toast")
