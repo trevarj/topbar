@@ -1234,6 +1234,26 @@ button.launcher-item.launcher-row {
     padding: 6px 10px;
 }
 
+button.launcher-item.launcher-row.launcher-file-row {
+    min-height: 30px;
+    padding: 2px 8px;
+    border-radius: 8px;
+}
+
+.launcher-file-row .launcher-item-title {
+    font-size: 0.9em;
+}
+
+.launcher-file-row .launcher-item-subtitle {
+    font-size: 0.83em;
+    font-style: normal;
+}
+
+.launcher-file-meta {
+    color: var(--color-foreground-muted);
+    font-size: 0.8em;
+}
+
 button.launcher-item.launcher-row .launcher-icon {
     -gtk-icon-size: 24px;
 }

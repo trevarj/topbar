@@ -274,12 +274,14 @@ pub const LAUNCHER_RESULTS: &str = "launcher-results";
 pub const LAUNCHER_SECTION: &str = "launcher-section";
 /// Responsive tile layout.
 pub const LAUNCHER_GRID: &str = "launcher-grid";
-/// Vertical result lists for windows, files, and actions.
+/// Vertical result lists for files and actions.
 pub const LAUNCHER_LIST: &str = "launcher-list";
 /// One launcher result tile.
 pub const LAUNCHER_ITEM: &str = "launcher-item";
 /// A compact row in a launcher result list.
 pub const LAUNCHER_ROW: &str = "launcher-row";
+/// Thin, icon-free row for file matches.
+pub const LAUNCHER_FILE_ROW: &str = "launcher-file-row";
 /// The keyboard-selected launcher tile.
 pub const LAUNCHER_ITEM_SELECTED: &str = "launcher-item-selected";
 /// Full-colour launcher icon.
@@ -288,6 +290,8 @@ pub const LAUNCHER_ICON: &str = "launcher-icon";
 pub const LAUNCHER_ITEM_TITLE: &str = "launcher-item-title";
 /// Launcher result subtitle.
 pub const LAUNCHER_ITEM_SUBTITLE: &str = "launcher-item-subtitle";
+/// Modification date and size shown at the end of a file result.
+pub const LAUNCHER_FILE_META: &str = "launcher-file-meta";
 /// Local launcher status or failure text.
 pub const LAUNCHER_STATUS: &str = "launcher-status";
 
@@ -846,10 +850,12 @@ pub const ALL: &[&str] = &[
     LAUNCHER_LIST,
     LAUNCHER_ITEM,
     LAUNCHER_ROW,
+    LAUNCHER_FILE_ROW,
     LAUNCHER_ITEM_SELECTED,
     LAUNCHER_ICON,
     LAUNCHER_ITEM_TITLE,
     LAUNCHER_ITEM_SUBTITLE,
+    LAUNCHER_FILE_META,
     LAUNCHER_STATUS,
     KEYBOARD_LAYOUT,
     KEYBOARD_LAYOUT_ICON,

@@ -7,6 +7,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::SystemTime;
 
 use gio::prelude::*;
 use gtk4::prelude::*;
@@ -174,9 +175,9 @@ fn show(services: &Services, config: &Config) -> bool {
 enum Filter {
     All,
     Applications,
+    Actions,
     Windows,
     Files,
-    Actions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -275,6 +276,13 @@ struct NavigationTarget {
     button: Button,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct FileResult {
+    entry: FileEntry,
+    modified: Option<SystemTime>,
+    size: Option<u64>,
+}
+
 #[derive(Clone)]
 enum ResultItem {
     Application(Application),
@@ -284,7 +292,7 @@ enum ResultItem {
         title: String,
         context: String,
     },
-    File(FileEntry),
+    File(FileResult),
     Theme,
     Wallpaper,
 }
@@ -294,7 +302,7 @@ impl ResultItem {
         match self {
             Self::Application(app) => format!("app:{}", app.desktop_id),
             Self::Window { id, .. } => format!("window:{id}"),
-            Self::File(file) => format!("file:{}", hex_identity(&file.identity())),
+            Self::File(file) => format!("file:{}", hex_identity(&file.entry.identity())),
             Self::Theme => "action:theme".to_string(),
             Self::Wallpaper => "action:wallpaper".to_string(),
         }
@@ -304,7 +312,7 @@ impl ResultItem {
         match self {
             Self::Application(app) => app.name.clone(),
             Self::Window { title, .. } => title.clone(),
-            Self::File(file) => file.basename(),
+            Self::File(file) => file.entry.basename(),
             Self::Theme => "Choose theme".into(),
             Self::Wallpaper => "Choose wallpaper".into(),
         }
@@ -319,7 +327,7 @@ impl ResultItem {
             Self::Window {
                 app_id, context, ..
             } => format!("{app_id} · {context}"),
-            Self::File(file) => file.home_relative_path(),
+            Self::File(file) => file.entry.home_relative_path(),
             Self::Theme => "Appearance".into(),
             Self::Wallpaper => "Appearance".into(),
         }
@@ -351,7 +359,7 @@ struct Launcher {
     items: RefCell<Vec<ResultItem>>,
     selected_index: Cell<usize>,
     navigation_targets: RefCell<Vec<NavigationTarget>>,
-    file_matches: RefCell<Vec<FileEntry>>,
+    file_matches: RefCell<Vec<FileResult>>,
     file_query: RefCell<Option<String>>,
     file_generation: Cell<u64>,
     /// The last catalog revision that was ranked for this surface. Discovery
@@ -409,7 +417,7 @@ impl Launcher {
 
         let search = Entry::new();
         search.add_css_class(classes::LAUNCHER_SEARCH);
-        search.set_placeholder_text(Some("Search applications, windows, files, and actions"));
+        search.set_placeholder_text(Some("Search applications, actions, windows, and files"));
         search.set_width_chars(48);
         search.set_max_width_chars(48);
         search.set_halign(Align::Center);
@@ -423,9 +431,9 @@ impl Launcher {
         for (filter, label) in [
             (Filter::All, "All"),
             (Filter::Applications, "Applications"),
+            (Filter::Actions, "Actions"),
             (Filter::Windows, "Windows"),
             (Filter::Files, "Files"),
-            (Filter::Actions, "Actions"),
         ] {
             let button = Button::with_label(label);
             button.add_css_class(classes::LAUNCHER_FILTER);
@@ -685,7 +693,11 @@ impl Launcher {
             }
             let mut matches = matches
                 .into_iter()
-                .map(|matched| matched.entry)
+                .map(|matched| FileResult {
+                    entry: matched.entry,
+                    modified: matched.modified,
+                    size: matched.size,
+                })
                 .collect::<Vec<_>>();
             let selected_file = launcher
                 .selected_id
@@ -702,7 +714,7 @@ impl Launcher {
                             _ => None,
                         })
                 });
-            pin_selected_result(&mut matches, selected_file, RESULT_LIMIT);
+            pin_selected_file_result(&mut matches, selected_file);
             launcher.refresh_status();
             if *launcher.file_matches.borrow() == matches {
                 return;
@@ -782,7 +794,17 @@ impl Launcher {
         let files = self.services.files.current();
         let windows = self.services.compositor.windows().borrow().clone();
         let old_id = self.selected_id.borrow().clone();
-        let items = self.collect(&query, &applications, &windows);
+        let items = Self::collect(
+            self.filter.get(),
+            &query,
+            &applications,
+            &windows,
+            &self.file_matches.borrow(),
+            [
+                self.config.appearance.theme_command.is_some(),
+                self.config.appearance.wallpaper_command.is_some(),
+            ],
+        );
         self.items.replace(items);
         let selected = stable_index(&self.items.borrow(), old_id.as_deref());
         let fallback_id = self.items.borrow().get(selected).map(ResultItem::id);
@@ -816,12 +838,14 @@ impl Launcher {
     }
 
     fn collect(
-        &self,
+        filter: Filter,
         query: &str,
         applications: &ApplicationsState,
         windows: &WindowsSnapshot,
+        file_matches: &[FileResult],
+        enabled_actions: [bool; 2],
     ) -> Vec<ResultItem> {
-        let wants = |kind| self.filter.get() == Filter::All || self.filter.get() == kind;
+        let wants = |kind| filter == Filter::All || filter == kind;
         let mut output = Vec::new();
         if wants(Filter::Applications) {
             let mut apps = applications.entries.clone();
@@ -837,6 +861,16 @@ impl Launcher {
                 });
             }
             output.extend(apps.into_iter().map(ResultItem::Application));
+        }
+        if !query.is_empty() && wants(Filter::Actions) {
+            for (item, enabled) in [
+                (ResultItem::Theme, enabled_actions[0]),
+                (ResultItem::Wallpaper, enabled_actions[1]),
+            ] {
+                if enabled && rank_match(query, &item.title()).is_some() {
+                    output.push(item);
+                }
+            }
         }
         if !query.is_empty() && wants(Filter::Windows) && windows.connected {
             let mut matches = windows
@@ -884,20 +918,7 @@ impl Launcher {
             }));
         }
         if !query.is_empty() && wants(Filter::Files) {
-            output.extend(
-                self.file_matches
-                    .borrow()
-                    .iter()
-                    .cloned()
-                    .map(ResultItem::File),
-            );
-        }
-        if !query.is_empty() && wants(Filter::Actions) {
-            for item in [ResultItem::Theme, ResultItem::Wallpaper] {
-                if rank_match(query, &item.title()).is_some() && self.action_enabled(&item) {
-                    output.push(item);
-                }
-            }
+            output.extend(file_matches.iter().cloned().map(ResultItem::File));
         }
         output
     }
@@ -974,7 +995,17 @@ impl Launcher {
                 false,
             );
             self.add_list_section(
-                Some(Section::Windows),
+                None,
+                "Actions",
+                items
+                    .iter()
+                    .filter(|item| matches!(item, ResultItem::Theme | ResultItem::Wallpaper))
+                    .cloned()
+                    .collect(),
+                None,
+            );
+            self.add_section(
+                Section::Windows,
                 "Windows",
                 items
                     .iter()
@@ -982,6 +1013,7 @@ impl Launcher {
                     .cloned()
                     .collect(),
                 section_messages.windows.as_deref(),
+                false,
             );
             self.add_list_section(
                 Some(Section::Files),
@@ -992,16 +1024,6 @@ impl Launcher {
                     .cloned()
                     .collect(),
                 section_messages.files.as_deref(),
-            );
-            self.add_list_section(
-                None,
-                "Actions",
-                items
-                    .iter()
-                    .filter(|item| matches!(item, ResultItem::Theme | ResultItem::Wallpaper))
-                    .cloned()
-                    .collect(),
-                None,
             );
         }
         self.update_status(query, !self.items.borrow().is_empty(), &section_messages);
@@ -1067,33 +1089,70 @@ impl Launcher {
     fn item_button(&self, item: ResultItem, frequent: bool) -> Button {
         let button = Button::new();
         button.add_css_class(classes::LAUNCHER_ITEM);
-        let body = gtk4::Box::new(Orientation::Vertical, 4);
-        let icon = match &item {
-            ResultItem::Application(app) => app
-                .icon
-                .as_deref()
-                .and_then(|serialized| gio::Icon::for_string(serialized).ok())
-                .map(|icon| Image::from_gicon(&icon))
-                .unwrap_or_else(|| Image::from_icon_name("application-x-executable")),
-            ResultItem::Window { .. } => Image::from_icon_name("window-symbolic"),
-            ResultItem::File(_) => Image::from_icon_name("text-x-generic-symbolic"),
-            ResultItem::Theme => Image::from_icon_name("preferences-desktop-theme-symbolic"),
-            ResultItem::Wallpaper => Image::from_icon_name("image-x-generic-symbolic"),
-        };
-        icon.add_css_class(classes::LAUNCHER_ICON);
-        body.append(&icon);
+        let is_file = matches!(&item, ResultItem::File(_));
+        let body = gtk4::Box::new(
+            if is_file {
+                Orientation::Horizontal
+            } else {
+                Orientation::Vertical
+            },
+            if is_file { 10 } else { 4 },
+        );
+        if is_file {
+            button.add_css_class(classes::LAUNCHER_FILE_ROW);
+        } else {
+            let icon = match &item {
+                ResultItem::Application(app) => app
+                    .icon
+                    .as_deref()
+                    .and_then(|serialized| gio::Icon::for_string(serialized).ok())
+                    .map(|icon| Image::from_gicon(&icon))
+                    .unwrap_or_else(|| Image::from_icon_name("application-x-executable")),
+                ResultItem::Window { .. } => Image::from_icon_name("window-symbolic"),
+                ResultItem::Theme => Image::from_icon_name("preferences-desktop-theme-symbolic"),
+                ResultItem::Wallpaper => Image::from_icon_name("image-x-generic-symbolic"),
+                ResultItem::File(_) => unreachable!("file rows do not have icons"),
+            };
+            icon.add_css_class(classes::LAUNCHER_ICON);
+            body.append(&icon);
+        }
         let title = Label::new(None);
         title.add_css_class(classes::LAUNCHER_ITEM_TITLE);
         title.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-        title.set_max_width_chars(22);
+        title.set_max_width_chars(if is_file { 28 } else { 22 });
         title.set_markup(&highlight(&item.title(), &self.search.text()));
         body.append(&title);
         let subtitle = Label::new(None);
         subtitle.add_css_class(classes::LAUNCHER_ITEM_SUBTITLE);
         subtitle.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-        subtitle.set_max_width_chars(22);
+        subtitle.set_max_width_chars(if is_file { 70 } else { 22 });
         subtitle.set_markup(&highlight(&item.subtitle(), &self.search.text()));
         body.append(&subtitle);
+        if let ResultItem::File(file) = &item {
+            title.set_xalign(0.0);
+            subtitle.set_xalign(0.0);
+            subtitle.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
+            subtitle.set_hexpand(true);
+            let mut metadata = file
+                .size
+                .map(|size| glib::format_size(size).to_string())
+                .unwrap_or_default();
+            if let Some(modified) = file.modified {
+                if !metadata.is_empty() {
+                    metadata.push_str(" · ");
+                }
+                metadata.push_str(
+                    &chrono::DateTime::<chrono::Local>::from(modified)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string(),
+                );
+            }
+            if !metadata.is_empty() {
+                let label = Label::new(Some(&metadata));
+                label.add_css_class(classes::LAUNCHER_FILE_META);
+                body.append(&label);
+            }
+        }
         button.set_child(Some(&body));
         let click_item = item.clone();
         button.connect_clicked(move |_| {
@@ -1113,7 +1172,7 @@ impl Launcher {
                 };
                 match &item {
                     ResultItem::Application(app) => app_menu(&widget, app.clone()),
-                    ResultItem::File(file) => file_menu(&widget, file.clone()),
+                    ResultItem::File(file) => file_menu(&widget, file.entry.clone()),
                     _ => {}
                 }
             }
@@ -1166,14 +1225,6 @@ impl Launcher {
         self.section_statuses.borrow_mut().insert(section, label);
     }
 
-    fn action_enabled(&self, item: &ResultItem) -> bool {
-        match item {
-            ResultItem::Theme => self.config.appearance.theme_command.is_some(),
-            ResultItem::Wallpaper => self.config.appearance.wallpaper_command.is_some(),
-            _ => true,
-        }
-    }
-
     fn activate_selected(&self) {
         if let Some(item) = self.items.borrow().get(self.selected_index.get()).cloned() {
             self.activate(item);
@@ -1186,7 +1237,7 @@ impl Launcher {
             return;
         }
         if let ResultItem::File(file) = &item {
-            self.open_file(file.clone());
+            self.open_file(file.entry.clone());
             return;
         }
         let services = self.services.clone();
@@ -1299,7 +1350,7 @@ fn file_menu(anchor: &gtk4::Widget, file: FileEntry) {
         action.connect_clicked(move |_| match label {
             "Open" => CURRENT.with_borrow(|current| {
                 if let Some(launcher) = current.as_ref() {
-                    launcher.activate(ResultItem::File(file.clone()));
+                    launcher.open_file(file.clone());
                 }
             }),
             "Show in Files" => {
@@ -1400,6 +1451,15 @@ fn pin_selected_result<T: Clone + PartialEq>(
         matches.truncate(limit - 1);
     }
     matches.push(selected);
+}
+
+fn pin_selected_file_result(matches: &mut Vec<FileResult>, selected: Option<FileResult>) {
+    let selected = selected.filter(|selected| {
+        !matches
+            .iter()
+            .any(|matched| matched.entry == selected.entry)
+    });
+    pin_selected_result(matches, selected, RESULT_LIMIT);
 }
 
 /// Return whether a service update contains a new visible catalog.
@@ -1627,6 +1687,72 @@ mod tests {
     }
 
     #[test]
+    fn results_follow_visible_priority_and_keep_file_and_window_identities() {
+        let applications = ApplicationsState {
+            entries: vec![Application {
+                desktop_id: "theme-editor.desktop".into(),
+                name: "Theme Editor".into(),
+                generic_name: None,
+                executable: "editor".into(),
+                keywords: Vec::new(),
+                aliases: Vec::new(),
+                icon: None,
+            }],
+            ..Default::default()
+        };
+        let windows = WindowsSnapshot {
+            connected: true,
+            windows: vec![topbar_services::WindowView {
+                id: 42,
+                app_id: "theme-editor".into(),
+                title: "Theme draft".into(),
+                workspace: None,
+                output: None,
+                focused_at_ms: None,
+            }],
+        };
+        let files = [FileResult {
+            entry: FileEntry::new("/tmp/theme-draft.txt".into()),
+            modified: None,
+            size: None,
+        }];
+        let results = Launcher::collect(
+            Filter::All,
+            "theme",
+            &applications,
+            &windows,
+            &files,
+            [true, false],
+        );
+        let ids = results.iter().map(ResultItem::id).collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            [
+                "app:theme-editor.desktop",
+                "action:theme",
+                "window:42",
+                "file:2f746d702f7468656d652d64726166742e747874",
+            ],
+        );
+        assert_eq!(stable_index(&results, None), 0);
+        assert_eq!(stable_index(&results, Some("window:42")), 2);
+        assert_eq!(
+            Launcher::collect(
+                Filter::Actions,
+                "theme",
+                &applications,
+                &windows,
+                &files,
+                [true, false]
+            )
+            .iter()
+            .map(ResultItem::id)
+            .collect::<Vec<_>>(),
+            ["action:theme"],
+        );
+    }
+
+    #[test]
     fn result_updates_keep_the_same_stable_selection() {
         let rows = [ResultItem::Wallpaper, ResultItem::Theme];
         assert_eq!(stable_index(&rows, Some("action:theme")), 1);
@@ -1694,6 +1820,24 @@ mod tests {
         let mut already_ranked = vec![3, 2, 1];
         pin_selected_result(&mut already_ranked, Some(2), RESULT_LIMIT);
         assert_eq!(already_ranked, vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn a_new_modified_date_does_not_duplicate_the_selected_file() {
+        let selected = FileResult {
+            entry: FileEntry::new("/tmp/theme-draft.txt".into()),
+            modified: None,
+            size: None,
+        };
+        let mut refreshed = vec![FileResult {
+            modified: Some(SystemTime::UNIX_EPOCH),
+            size: Some(1024),
+            ..selected.clone()
+        }];
+        pin_selected_file_result(&mut refreshed, Some(selected));
+        assert_eq!(refreshed.len(), 1);
+        assert_eq!(refreshed[0].modified, Some(SystemTime::UNIX_EPOCH));
+        assert_eq!(refreshed[0].size, Some(1024));
     }
 
     #[test]
@@ -1859,33 +2003,51 @@ mod tests {
     }
 
     #[test]
-    fn spatial_navigation_crosses_list_sections_by_aligned_rows() {
-        let bounds = |x, y, width| NavigationBounds {
-            x,
-            y,
-            width,
-            height: 36.0,
-        };
-        let rows = [
-            ("window", bounds(0.0, 0.0, 300.0)),
-            ("file", bounds(0.0, 52.0, 300.0)),
-            ("action", bounds(0.0, 104.0, 300.0)),
+    fn spatial_navigation_crosses_action_row_window_grid_and_file_row() {
+        let targets = [
+            (
+                "action",
+                NavigationBounds {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 300.0,
+                    height: 44.0,
+                },
+            ),
+            (
+                "window",
+                NavigationBounds {
+                    x: 0.0,
+                    y: 52.0,
+                    width: 148.0,
+                    height: 118.0,
+                },
+            ),
+            (
+                "file",
+                NavigationBounds {
+                    x: 0.0,
+                    y: 190.0,
+                    width: 300.0,
+                    height: 30.0,
+                },
+            ),
         ];
         assert_eq!(
             spatial_candidate(
-                rows[1].1,
-                rows.iter().copied().filter(|(id, _)| *id != "file"),
+                targets[1].1,
+                targets.iter().copied().filter(|(id, _)| *id != "window"),
                 Direction::Up
             ),
-            Some("window")
+            Some("action")
         );
         assert_eq!(
             spatial_candidate(
-                rows[1].1,
-                rows.iter().copied().filter(|(id, _)| *id != "file"),
+                targets[1].1,
+                targets.iter().copied().filter(|(id, _)| *id != "window"),
                 Direction::Down
             ),
-            Some("action")
+            Some("file")
         );
     }
 

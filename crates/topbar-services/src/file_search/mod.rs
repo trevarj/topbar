@@ -137,7 +137,8 @@ pub struct FileEntry {
 }
 
 impl FileEntry {
-    fn new(path: PathBuf) -> Self {
+    /// Retain an original pathname for search and activation.
+    pub fn new(path: PathBuf) -> Self {
         Self { path }
     }
 
@@ -188,6 +189,10 @@ pub struct FileMatch {
     pub basename_matches: Vec<usize>,
     /// Character offsets matched in the display path, for highlighting.
     pub path_matches: Vec<usize>,
+    /// Filesystem modification time, looked up only for ranked results off GTK.
+    pub modified: Option<SystemTime>,
+    /// File size in bytes, if the file still exists when the search completes.
+    pub size: Option<u64>,
 }
 
 /// A deterministic fuzzy match suitable for every launcher search surface.
@@ -418,7 +423,9 @@ async fn run(
                     let snapshot = publisher.borrow().clone();
                     let generation = pending.generation;
                     let task = tokio::task::spawn_blocking(move || {
-                        rank(snapshot.entries.as_ref(), &pending.query)
+                        let mut matches = rank(snapshot.entries.as_ref(), &pending.query);
+                        load_result_metadata(&mut matches);
+                        matches
                     });
                     let completed = ranked_tx.clone();
                     tokio::spawn(async move {
@@ -976,6 +983,16 @@ pub fn rank(entries: &[FileEntry], query: &str) -> Vec<FileMatch> {
     matches
 }
 
+/// The catalog only stores paths; stat at most the visible results on the search worker.
+fn load_result_metadata(matches: &mut [FileMatch]) {
+    for matched in matches {
+        if let Ok(metadata) = std::fs::metadata(matched.entry.path()) {
+            matched.modified = metadata.modified().ok();
+            matched.size = Some(metadata.len());
+        }
+    }
+}
+
 fn rank_entry(entry: &FileEntry, query: &str, index: usize) -> Option<RankedMatch> {
     let basename = entry.basename();
     let display_path = entry.home_relative_path();
@@ -1035,6 +1052,8 @@ impl RankedMatch {
             score: self.score,
             basename_matches: self.basename_matches,
             path_matches: self.path_matches,
+            modified: None,
+            size: None,
         }
     }
 }
@@ -1460,6 +1479,46 @@ mod tests {
         let entry = FileEntry::new(path_from_bytes(b"/tmp/odd-\xff-name".to_vec()));
         assert_eq!(entry.identity(), b"/tmp/odd-\xff-name");
         assert!(entry.display_path().contains('\u{fffd}'));
+    }
+
+    #[test]
+    fn metadata_enriches_ranked_results_without_losing_removed_files() {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/file_search/mod.rs");
+        let missing = source.with_file_name("missing-file_search-fixture.rs");
+        let mut matches = rank(
+            &[
+                FileEntry::new(source.clone()),
+                FileEntry::new(missing.clone()),
+            ],
+            "file_search",
+        );
+        assert_eq!(matches.len(), 2);
+        let identities = matches
+            .iter()
+            .map(|matched| matched.entry.identity())
+            .collect::<Vec<_>>();
+        load_result_metadata(&mut matches);
+        assert_eq!(
+            matches
+                .iter()
+                .map(|matched| matched.entry.identity())
+                .collect::<Vec<_>>(),
+            identities,
+        );
+        let existing = matches
+            .iter()
+            .find(|matched| matched.entry.path() == source)
+            .unwrap();
+        assert!(existing.modified.is_some());
+        assert_eq!(
+            existing.size,
+            Some(std::fs::metadata(source).unwrap().len())
+        );
+        let removed = matches
+            .iter()
+            .find(|matched| matched.entry.path() == missing)
+            .unwrap();
+        assert_eq!((removed.modified, removed.size), (None, None));
     }
 
     #[test]
