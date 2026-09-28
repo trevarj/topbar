@@ -28,7 +28,7 @@ use topbar_services::{Runtime, rank_match};
 use crate::anim::{Animation, AnimationParams, Easing};
 use crate::cli::ChooseLayout;
 use crate::ipc_client;
-use crate::style::{self, classes};
+use crate::style::{self, classes, icons};
 use crate::surfaces::modal;
 use crate::wayland::blur::BlurAttachment;
 
@@ -882,6 +882,36 @@ fn matching_indices(candidates: &[Candidate], query: &str) -> Vec<usize> {
         .collect()
 }
 
+fn random_wallpaper_index(
+    candidates: &[Candidate],
+    visible: &[usize],
+    selected: Option<&str>,
+) -> Option<usize> {
+    let eligible = visible
+        .iter()
+        .filter(|&&index| candidates[index].preview.is_some())
+        .count();
+    if eligible == 0 {
+        return None;
+    }
+    // ponytail: scan twice rather than allocate another list of eligible rows.
+    let skip_selected = eligible > 1
+        && selected.is_some_and(|id| {
+            visible
+                .iter()
+                .any(|&index| candidates[index].preview.is_some() && candidates[index].id == id)
+        });
+    let slot = glib::random_int_range(0, (eligible - usize::from(skip_selected)) as i32) as usize;
+    visible
+        .iter()
+        .copied()
+        .filter(|&index| {
+            candidates[index].preview.is_some()
+                && (!skip_selected || Some(candidates[index].id.as_str()) != selected)
+        })
+        .nth(slot)
+}
+
 fn retained_selection(
     candidates: &[Candidate],
     visible: &[usize],
@@ -942,6 +972,7 @@ struct Chooser {
     status: Label,
     retry: Button,
     cancel_button: Button,
+    random: Button,
     current: Option<String>,
     selected: RefCell<Option<String>>,
     search: Entry,
@@ -1049,11 +1080,25 @@ impl Chooser {
         root.set_margin_top(vertical_margin);
         root.set_margin_bottom(vertical_margin);
 
+        let header = gtk4::Box::new(Orientation::Horizontal, 8);
         let title = Label::new(Some(&title_text));
         title.add_css_class(classes::CHOOSER_TITLE);
         title.set_xalign(0.0);
         title.set_wrap(true);
-        root.append(&title);
+        title.set_hexpand(true);
+        header.append(&title);
+        let random = Button::from_icon_name(icons::WALLPAPER_RANDOM);
+        random.add_css_class(classes::DIALOG_BUTTON);
+        random.add_css_class(classes::CHOOSER_RANDOM);
+        random.set_tooltip_text(Some("Select a random wallpaper"));
+        random.update_property(&[gtk4::accessible::Property::Label("Random wallpaper")]);
+        random.set_focus_on_click(false);
+        random.set_valign(Align::Start);
+        if layout == ChooseLayout::Wallpapers {
+            header.append(&random);
+        }
+        install_interaction_feedback(&random);
+        root.append(&header);
         if let Some(message_text) = message_text.filter(|text| !text.is_empty()) {
             let message = Label::new(Some(&message_text));
             message.add_css_class(classes::CHOOSER_MESSAGE);
@@ -1211,6 +1256,7 @@ impl Chooser {
             status,
             retry,
             cancel_button: cancel.clone(),
+            random,
             current,
             selected: RefCell::new(initial),
             search,
@@ -1313,6 +1359,7 @@ impl Chooser {
         self.wallhaven_tab.set_sensitive(!saving);
         self.cancel_button.set_sensitive(!saving);
         self.search.set_sensitive(!saving);
+        self.update_random_sensitivity();
         self.pool_tab
             .remove_css_class(classes::DIALOG_BUTTON_PRIMARY);
         self.wallhaven_tab
@@ -1545,6 +1592,14 @@ impl Chooser {
     }
 
     fn wire(self: &Rc<Self>, cancel: &Button) {
+        self.random.connect_clicked({
+            let weak = Rc::downgrade(self);
+            move |_| {
+                if let Some(chooser) = weak.upgrade() {
+                    chooser.select_random_wallpaper();
+                }
+            }
+        });
         let wheel = gtk4::EventControllerScroll::new(gtk4::EventControllerScrollFlags::VERTICAL);
         wheel.set_propagation_phase(gtk4::PropagationPhase::Capture);
         wheel.connect_scroll({
@@ -1623,7 +1678,12 @@ impl Chooser {
                     gdk::Key::Down => chooser.move_selection(1),
                     gdk::Key::Home => chooser.select_at(0),
                     gdk::Key::End => chooser.select_at(usize::MAX),
-                    gdk::Key::Return | gdk::Key::KP_Enter => chooser.accept(),
+                    gdk::Key::Return | gdk::Key::KP_Enter => {
+                        if chooser.random.has_focus() {
+                            return glib::Propagation::Proceed;
+                        }
+                        chooser.accept();
+                    }
                     _ => return glib::Propagation::Proceed,
                 }
                 glib::Propagation::Stop
@@ -1705,6 +1765,37 @@ impl Chooser {
 
     fn query_indices(&self) -> Vec<usize> {
         matching_indices(&self.candidates.borrow(), self.search.text().trim())
+    }
+
+    fn update_random_sensitivity(&self) {
+        let pending = self
+            .wallpaper
+            .borrow()
+            .as_ref()
+            .is_some_and(WallpaperState::blocks_selection);
+        let visible = self.query_indices();
+        let candidates = self.candidates.borrow();
+        self.random.set_sensitive(
+            !pending
+                && visible
+                    .iter()
+                    .any(|&index| candidates[index].preview.is_some()),
+        );
+    }
+
+    fn select_random_wallpaper(self: &Rc<Self>) {
+        if !self.random.is_sensitive() {
+            return;
+        }
+        let visible = self.query_indices();
+        let index = random_wallpaper_index(
+            &self.candidates.borrow(),
+            &visible,
+            self.selected.borrow().as_deref(),
+        );
+        if let Some(index) = index {
+            self.select_index(index);
+        }
     }
 
     fn ensure_visible_selection(self: &Rc<Self>) {
@@ -1957,6 +2048,9 @@ impl Chooser {
         self.render_preview();
         self.update_apply_sensitivity();
         self.refresh_thumbnail_interests();
+        if self.layout == ChooseLayout::Wallpapers {
+            self.update_random_sensitivity();
+        }
     }
 
     fn row(self: &Rc<Self>, index: usize) -> Button {
@@ -2746,6 +2840,45 @@ mod tests {
             retained_selection(&candidates, &[0], Some("same-label-b")),
             Some("same-label-a".to_string())
         );
+    }
+
+    #[test]
+    fn random_wallpaper_only_chooses_visible_previewable_rows() {
+        let mut candidates = vec![
+            candidate("ocean-one", "Ocean One", None),
+            candidate("mountain", "Mountain", None),
+            candidate("ocean-no-preview", "Ocean Unavailable", None),
+            candidate("ocean-two", "Ocean Two", None),
+        ];
+        candidates[0].preview = Some(PathBuf::from("/wallpapers/one.png"));
+        candidates[1].preview = Some(PathBuf::from("/wallpapers/mountain.png"));
+        candidates[3].preview = Some(PathBuf::from("/wallpapers/two.png"));
+        let visible = matching_indices(&candidates, "ocean");
+        assert_eq!(random_wallpaper_index(&candidates, &[], None), None);
+        assert_eq!(
+            random_wallpaper_index(
+                &candidates,
+                &matching_indices(&candidates, "Unavailable"),
+                None,
+            ),
+            None
+        );
+        assert_eq!(
+            random_wallpaper_index(&candidates, &[3], Some("ocean-two")),
+            Some(3)
+        );
+        assert_eq!(
+            random_wallpaper_index(&candidates, &visible, Some("ocean-one")),
+            Some(3)
+        );
+        assert_eq!(
+            random_wallpaper_index(&candidates, &visible, Some("ocean-two")),
+            Some(0)
+        );
+        assert!(matches!(
+            random_wallpaper_index(&candidates, &visible, None),
+            Some(0 | 3)
+        ));
     }
 
     #[test]

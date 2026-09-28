@@ -188,6 +188,8 @@ pub const EXPAND: &str = "pan-down-symbolic";
 /// row uses: a list where exactly one entry is ticked reads the same either
 /// way, and one icon is one thing to keep.
 pub const SELECTED: &str = "object-select-symbolic";
+/// Select a wallpaper at random.
+pub const WALLPAPER_RANDOM: &str = "media-playlist-shuffle-symbolic";
 
 /// The volume icon for a level and a mute flag.
 pub fn volume(percent: u32, muted: bool) -> &'static str {
@@ -290,6 +292,7 @@ mod tests {
             VPN_DISCONNECTED,
             EXPAND,
             SELECTED,
+            WALLPAPER_RANDOM,
             UPDATES,
             UNSEEN_NOTIFICATIONS,
         ];

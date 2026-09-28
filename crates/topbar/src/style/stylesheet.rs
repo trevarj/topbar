@@ -1111,6 +1111,11 @@ button.dialog-button {
     color: var(--color-foreground);
 }
 
+button.dialog-button.chooser-random {
+    min-width: 30px;
+    padding: 2px 8px;
+}
+
 button.dialog-button:hover {
     background-color: var(--color-widget-hover);
 }

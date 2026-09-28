@@ -196,6 +196,8 @@ pub const CHOOSER_BACKDROP: &str = "chooser-backdrop";
 pub const CHOOSER_DIALOG: &str = "chooser-dialog";
 /// The chooser's heading.
 pub const CHOOSER_TITLE: &str = "chooser-title";
+/// The wallpaper chooser's compact random control.
+pub const CHOOSER_RANDOM: &str = "chooser-random";
 /// Optional explanatory copy below the heading.
 pub const CHOOSER_MESSAGE: &str = "chooser-message";
 /// The chooser's search field.
@@ -809,6 +811,7 @@ pub const ALL: &[&str] = &[
     CHOOSER_BACKDROP,
     CHOOSER_DIALOG,
     CHOOSER_TITLE,
+    CHOOSER_RANDOM,
     CHOOSER_MESSAGE,
     CHOOSER_SEARCH,
     CHOOSER_RESULTS,
