@@ -785,9 +785,25 @@ impl Launcher {
         let items = self.collect(&query, &applications, &windows);
         self.items.replace(items);
         let selected = stable_index(&self.items.borrow(), old_id.as_deref());
-        self.selected_index.set(selected);
-        *self.selected_id.borrow_mut() = self.items.borrow().get(selected).map(ResultItem::id);
+        let fallback_id = self.items.borrow().get(selected).map(ResultItem::id);
         self.draw(&query, &applications, &files, &windows);
+        let targets = self.navigation_targets.borrow();
+        let selected = targets
+            .iter()
+            .find(|target| Some(target.id.as_str()) == old_id.as_deref())
+            .or_else(|| {
+                targets
+                    .iter()
+                    .find(|target| Some(target.id.as_str()) == fallback_id.as_deref())
+            })
+            .or_else(|| targets.first());
+        let selected_id = selected.map(|target| {
+            target.button.add_css_class(classes::LAUNCHER_ITEM_SELECTED);
+            target.id.clone()
+        });
+        self.selected_index
+            .set(stable_index(&self.items.borrow(), selected_id.as_deref()));
+        *self.selected_id.borrow_mut() = selected_id;
     }
 
     fn set_global_message(&self, message: &str) {
@@ -934,6 +950,7 @@ impl Launcher {
                     "Frequent",
                     frequent.into_iter().map(ResultItem::Application).collect(),
                     None,
+                    true,
                 );
             }
             self.add_section(
@@ -941,6 +958,7 @@ impl Launcher {
                 "Applications",
                 self.items.borrow().clone(),
                 section_messages.applications.as_deref(),
+                false,
             );
         } else {
             let items = self.items.borrow().clone();
@@ -953,6 +971,7 @@ impl Launcher {
                     .cloned()
                     .collect(),
                 section_messages.applications.as_deref(),
+                false,
             );
             self.add_list_section(
                 Some(Section::Windows),
@@ -1020,6 +1039,7 @@ impl Launcher {
         title: &str,
         items: Vec<ResultItem>,
         message: Option<&str>,
+        frequent: bool,
     ) {
         if items.is_empty() && message.is_none() {
             return;
@@ -1038,19 +1058,15 @@ impl Launcher {
         grid.set_max_children_per_line(6);
         grid.set_min_children_per_line(1);
         for item in items {
-            let selected = self.selected_id.borrow().as_ref() == Some(&item.id());
-            let button = self.item_button(item, selected);
+            let button = self.item_button(item, frequent);
             grid.insert(&button, -1);
         }
         self.results.append(&grid);
     }
 
-    fn item_button(&self, item: ResultItem, selected: bool) -> Button {
+    fn item_button(&self, item: ResultItem, frequent: bool) -> Button {
         let button = Button::new();
         button.add_css_class(classes::LAUNCHER_ITEM);
-        if selected {
-            button.add_css_class(classes::LAUNCHER_ITEM_SELECTED);
-        }
         let body = gtk4::Box::new(Orientation::Vertical, 4);
         let icon = match &item {
             ResultItem::Application(app) => app
@@ -1104,7 +1120,7 @@ impl Launcher {
         });
         button.add_controller(secondary);
         self.navigation_targets.borrow_mut().push(NavigationTarget {
-            id: item.id(),
+            id: navigation_id(&item, frequent),
             button: button.clone(),
         });
         button
@@ -1133,8 +1149,7 @@ impl Launcher {
         let list = gtk4::Box::new(Orientation::Vertical, 4);
         list.add_css_class(classes::LAUNCHER_LIST);
         for item in items {
-            let selected = self.selected_id.borrow().as_ref() == Some(&item.id());
-            let button = self.item_button(item, selected);
+            let button = self.item_button(item, false);
             button.add_css_class(classes::LAUNCHER_ROW);
             list.append(&button);
         }
@@ -1392,9 +1407,18 @@ fn catalog_revision_changed(last_seen: &Cell<u64>, current: u64) -> bool {
     last_seen.replace(current) != current
 }
 
+fn navigation_id(item: &ResultItem, frequent: bool) -> String {
+    if frequent {
+        format!("frequent:{}", item.id())
+    } else {
+        item.id()
+    }
+}
+
 /// Keep an existing selection when an asynchronous result update reorders rows.
 fn stable_index(items: &[ResultItem], selected_id: Option<&str>) -> usize {
     selected_id
+        .map(|id| id.strip_prefix("frequent:").unwrap_or(id))
         .and_then(|selected_id| items.iter().position(|item| item.id() == selected_id))
         .unwrap_or(0)
 }
@@ -1487,17 +1511,24 @@ fn spatial_target(
             })
         })
         .collect::<Vec<_>>();
+    spatial_target_for_bounds(&bounds, selected_id, direction).map(str::to_string)
+}
+
+fn spatial_target_for_bounds<'a>(
+    bounds: &[(&'a str, NavigationBounds)],
+    selected_id: &str,
+    direction: Direction,
+) -> Option<&'a str> {
     let current = bounds
         .iter()
         .find_map(|(id, bounds)| (*id == selected_id).then_some(*bounds))?;
-    let target = spatial_candidate(
+    spatial_candidate(
         current,
         bounds
             .iter()
             .filter_map(|(id, bounds)| (*id != selected_id).then_some((*id, *bounds))),
         direction,
-    )?;
-    Some(target.to_string())
+    )
 }
 
 fn spatial_candidate<'a>(
@@ -1600,6 +1631,55 @@ mod tests {
         let rows = [ResultItem::Wallpaper, ResultItem::Theme];
         assert_eq!(stable_index(&rows, Some("action:theme")), 1);
         assert_eq!(stable_index(&rows, Some("gone")), 0);
+    }
+
+    #[test]
+    fn duplicate_application_rows_keep_distinct_focus_and_navigation() {
+        let application_item = |id: &str| {
+            ResultItem::Application(Application {
+                desktop_id: id.into(),
+                name: id.into(),
+                generic_name: None,
+                executable: "editor".into(),
+                keywords: Vec::new(),
+                aliases: Vec::new(),
+                icon: None,
+            })
+        };
+        let app = application_item("editor.desktop");
+        let frequent = navigation_id(&app, true);
+        let first = application_item("aardvark.desktop");
+        let other = application_item("other.desktop");
+        let first_id = navigation_id(&first, false);
+        let application = navigation_id(&app, false);
+        let next = navigation_id(&other, false);
+        let bounds = |x, y| NavigationBounds {
+            x,
+            y,
+            width: 80.0,
+            height: 80.0,
+        };
+        let targets = [
+            (frequent.as_str(), bounds(100.0, 0.0)),
+            (first_id.as_str(), bounds(0.0, 150.0)),
+            (application.as_str(), bounds(100.0, 150.0)),
+            (next.as_str(), bounds(200.0, 150.0)),
+        ];
+
+        assert_eq!(targets.iter().filter(|(id, _)| *id == frequent).count(), 1);
+        assert_eq!(
+            targets.iter().filter(|(id, _)| *id == application).count(),
+            1
+        );
+        assert_eq!(stable_index(&[first, app, other], Some(&frequent)), 1);
+        assert_eq!(
+            spatial_target_for_bounds(&targets, &frequent, Direction::Down),
+            Some(application.as_str())
+        );
+        assert_eq!(
+            spatial_target_for_bounds(&targets, &application, Direction::Right),
+            Some(next.as_str())
+        );
     }
 
     #[test]
