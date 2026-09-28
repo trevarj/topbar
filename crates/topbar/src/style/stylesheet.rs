@@ -1227,7 +1227,13 @@ button.launcher-item {
     color: var(--color-foreground);
 }
 
-button.launcher-item:hover,
+/* GTK wraps grid buttons in flowboxchild nodes with their own padding.
+   Keep the button lit while the pointer crosses that padding. */
+flowbox.launcher-grid > flowboxchild:hover > button.launcher-item,
+button.launcher-item:hover {
+    background-color: var(--color-widget-hover);
+}
+
 button.launcher-item-selected {
     background-color: var(--color-widget-hover);
     border-color: var(--color-accent);
