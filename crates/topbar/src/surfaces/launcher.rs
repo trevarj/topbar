@@ -283,7 +283,7 @@ struct FileResult {
     size: Option<u64>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 enum ResultItem {
     Application(Application),
     Window {
@@ -355,6 +355,8 @@ struct Launcher {
     global_message: RefCell<Option<String>>,
     filter: Cell<Filter>,
     instance: u64,
+    drawn_query: RefCell<Option<String>>,
+    drawn_filter: Cell<Filter>,
     selected_id: RefCell<Option<String>>,
     items: RefCell<Vec<ResultItem>>,
     selected_index: Cell<usize>,
@@ -489,6 +491,8 @@ impl Launcher {
                 next.set(instance.wrapping_add(1));
                 instance
             }),
+            drawn_query: RefCell::new(None),
+            drawn_filter: Cell::new(Filter::All),
             selected_id: RefCell::new(None),
             items: RefCell::new(Vec::new()),
             selected_index: Cell::new(0),
@@ -630,7 +634,10 @@ impl Launcher {
         let windows = bridge::bind_state(&self.results, self.services.compositor.windows(), {
             let launcher = Rc::downgrade(self);
             move |_, _| {
-                if let Some(launcher) = launcher.upgrade() {
+                if let Some(launcher) = launcher.upgrade()
+                    && !launcher.search.text().is_empty()
+                    && matches!(launcher.filter.get(), Filter::All | Filter::Windows)
+                {
                     launcher.render();
                 }
             }
@@ -805,6 +812,23 @@ impl Launcher {
                 self.config.appearance.wallpaper_command.is_some(),
             ],
         );
+        let same_results = self.drawn_query.borrow().as_deref() == Some(query.as_str())
+            && self.drawn_filter.get() == self.filter.get()
+            && *self.items.borrow() == items;
+        if same_results {
+            let messages =
+                section_messages(self.filter.get(), &query, &applications, &files, &windows);
+            if !section_structure_changed(
+                self.section_statuses.borrow().presence(),
+                section_presence(&items, &messages),
+            ) {
+                // A service metadata update must not replace buttons under the pointer.
+                self.update_status(&query, !items.is_empty(), &messages);
+                return;
+            }
+        }
+        *self.drawn_query.borrow_mut() = Some(query.clone());
+        self.drawn_filter.set(self.filter.get());
         self.items.replace(items);
         let selected = stable_index(&self.items.borrow(), old_id.as_deref());
         let fallback_id = self.items.borrow().get(selected).map(ResultItem::id);

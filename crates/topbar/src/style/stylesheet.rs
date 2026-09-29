@@ -1216,6 +1216,11 @@ flowbox.launcher-grid {
     border-spacing: 8px;
 }
 
+/* GTK can paint the FlowBoxChild's square background behind the rounded button. */
+flowbox.launcher-grid > flowboxchild {
+    background: none;
+}
+
 button.launcher-item {
     min-width: 148px;
     min-height: 118px;
