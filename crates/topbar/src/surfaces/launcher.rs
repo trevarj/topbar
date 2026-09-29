@@ -277,6 +277,7 @@ impl NavigationBounds {
 struct NavigationTarget {
     id: String,
     window_labels: Option<(Label, Label)>,
+    window_icon: Option<Image>,
     button: Button,
 }
 
@@ -295,6 +296,7 @@ enum ResultItem {
         app_id: String,
         title: String,
         context: String,
+        icon: Option<String>,
     },
     File(FileResult),
     Theme,
@@ -917,18 +919,12 @@ impl Launcher {
                 .windows
                 .iter()
                 .filter_map(|window| {
+                    let application =
+                        unambiguous_application(&applications.entries, &window.app_id);
                     if query.is_empty() {
-                        return Some((0, window));
+                        return Some((0, window, application));
                     }
-                    let app_name = applications
-                        .entries
-                        .iter()
-                        .find(|app| {
-                            app.identities().any(|identity| {
-                                normalize_identity(identity) == normalize_identity(&window.app_id)
-                            })
-                        })
-                        .map(|app| app.name.as_str());
+                    let app_name = application.map(|app| app.name.as_str());
                     let app_match = rank_match(query, &window.app_id)
                         .into_iter()
                         .chain(app_name.and_then(|name| rank_match(query, name)))
@@ -939,18 +935,19 @@ impl Launcher {
                         .chain(title_match)
                         .map(|matched| matched.score)
                         .max()?;
-                    Some((score, window))
+                    Some((score, window, application))
                 })
                 .collect::<Vec<_>>();
-            matches.sort_by(|(left_score, left), (right_score, right)| {
+            matches.sort_by(|(left_score, left, _), (right_score, right, _)| {
                 right_score
                     .cmp(left_score)
                     .then_with(|| left.id.cmp(&right.id))
             });
-            output.extend(matches.into_iter().map(|(_, window)| {
+            output.extend(matches.into_iter().map(|(_, window, application)| {
                 ResultItem::Window {
                     id: window.id,
                     app_id: window.app_id.clone(),
+                    icon: application.and_then(|app| app.icon.clone()),
                     title: window.title.clone(),
                     context: [window.workspace.as_deref(), window.output.as_deref()]
                         .into_iter()
@@ -1008,6 +1005,24 @@ impl Launcher {
                     let (title, subtitle) = target.window_labels.as_ref().expect("window labels");
                     title.set_markup(&highlight(&item.title(), &self.search.text()));
                     subtitle.set_markup(&highlight(&item.subtitle(), &self.search.text()));
+                }
+                if let ResultItem::Window { icon, .. } = item {
+                    let icon_changed = self
+                        .items
+                        .borrow()
+                        .iter()
+                        .find(|old| old.id() == id)
+                        .and_then(|old| match old {
+                            ResultItem::Window { icon, .. } => Some(icon),
+                            _ => None,
+                        })
+                        != Some(icon);
+                    if icon_changed {
+                        set_window_icon(
+                            target.window_icon.as_ref().expect("window icon"),
+                            icon.as_deref(),
+                        );
+                    }
                 }
             } else {
                 let button = self.item_button(item.clone(), false);
@@ -1230,6 +1245,7 @@ impl Launcher {
             },
             if is_file { 10 } else { 4 },
         );
+        let mut window_icon = None;
         if is_file {
             button.add_css_class(classes::LAUNCHER_FILE_ROW);
         } else {
@@ -1240,7 +1256,12 @@ impl Launcher {
                     .and_then(|serialized| gio::Icon::for_string(serialized).ok())
                     .map(|icon| Image::from_gicon(&icon))
                     .unwrap_or_else(|| Image::from_icon_name("application-x-executable")),
-                ResultItem::Window { .. } => Image::from_icon_name("window-symbolic"),
+                ResultItem::Window { icon, .. } => {
+                    let image = Image::new();
+                    set_window_icon(&image, icon.as_deref());
+                    window_icon = Some(image.clone());
+                    image
+                }
                 ResultItem::Theme => Image::from_icon_name("preferences-desktop-theme-symbolic"),
                 ResultItem::Wallpaper => Image::from_icon_name("image-x-generic-symbolic"),
                 ResultItem::File(_) => unreachable!("file rows do not have icons"),
@@ -1325,6 +1346,7 @@ impl Launcher {
         self.navigation_targets.borrow_mut().push(NavigationTarget {
             id: navigation_id(&item, frequent),
             window_labels: matches!(&item, ResultItem::Window { .. }).then_some((title, subtitle)),
+            window_icon,
             button: button.clone(),
         });
         button
@@ -1591,16 +1613,30 @@ fn normalize_identity(value: &str) -> String {
         .to_ascii_lowercase()
 }
 
+fn unambiguous_application<'a>(
+    applications: &'a [Application],
+    app_id: &str,
+) -> Option<&'a Application> {
+    let normalized = normalize_identity(app_id);
+    let mut matches = applications.iter().filter(|application| {
+        application
+            .identities()
+            .any(|identity| normalize_identity(identity) == normalized)
+    });
+    let application = matches.next()?;
+    matches.next().is_none().then_some(application)
+}
+
 fn unambiguous_application_id(applications: &[Application], app_id: &str) -> Option<String> {
-    let matches = applications
-        .iter()
-        .filter(|application| {
-            application
-                .identities()
-                .any(|identity| normalize_identity(identity) == normalize_identity(app_id))
-        })
-        .collect::<Vec<_>>();
-    (matches.len() == 1).then(|| matches[0].desktop_id.clone())
+    unambiguous_application(applications, app_id).map(|app| app.desktop_id.clone())
+}
+
+fn set_window_icon(image: &Image, serialized: Option<&str>) {
+    if let Some(icon) = serialized.and_then(|value| gio::Icon::for_string(value).ok()) {
+        image.set_from_gicon(&icon);
+    } else {
+        image.set_icon_name(Some("window-symbolic"));
+    }
 }
 
 /// Stable file IDs retain every original pathname byte, including invalid UTF-8.
@@ -2194,6 +2230,68 @@ mod tests {
             unambiguous_application_id(&[app("one.desktop"), app("two.desktop")], "shared"),
             None
         );
+    }
+
+    #[test]
+    fn window_icons_follow_unambiguous_catalog_matches_and_updates() {
+        let app = |id: &str, aliases: Vec<String>, icon: Option<&str>| Application {
+            desktop_id: id.into(),
+            name: id.into(),
+            generic_name: None,
+            executable: id.into(),
+            keywords: Vec::new(),
+            aliases,
+            icon: icon.map(str::to_owned),
+        };
+        let window = |id, app_id: &str| topbar_services::WindowView {
+            id,
+            app_id: app_id.into(),
+            title: "Document".into(),
+            workspace: None,
+            output: None,
+            focused_at_ms: None,
+        };
+        let mut applications = ApplicationsState {
+            entries: vec![
+                app("org.example.editor.desktop", vec![], Some("editor-icon")),
+                app("first.desktop", vec!["shared".into()], Some("first-icon")),
+                app("second.desktop", vec!["shared".into()], Some("second-icon")),
+            ],
+            ..Default::default()
+        };
+        let windows = WindowsSnapshot {
+            connected: true,
+            windows: vec![
+                window(1, "@org.Example.Editor"),
+                window(2, "unknown"),
+                window(3, "shared"),
+            ],
+        };
+        let icons = |applications: &ApplicationsState| {
+            Launcher::collect(Filter::Windows, "", applications, &windows, &[], [false; 2])
+                .into_iter()
+                .map(|item| match item {
+                    ResultItem::Window { icon, .. } => icon,
+                    _ => unreachable!(),
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            icons(&applications),
+            [Some("editor-icon".into()), None, None]
+        );
+        assert!(gio::Icon::for_string("editor-icon").is_ok());
+        applications.entries[0].icon = Some("replacement-icon".into());
+        assert_eq!(icons(&applications)[0].as_deref(), Some("replacement-icon"));
+        applications.entries[0].icon = None;
+        assert_eq!(icons(&applications)[0], None);
+        applications.entries.push(app(
+            "other.desktop",
+            vec!["org.example.editor".into()],
+            Some("other-icon"),
+        ));
+        assert_eq!(icons(&applications), [None, None, None]);
     }
 
     #[test]
