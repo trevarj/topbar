@@ -96,6 +96,7 @@
               --prefix PATH : "${
                 lib.makeBinPath [
                   pkgs.fd
+                  pkgs.systemd
                   pkgs.xdg-terminal-exec
                 ]
               }"

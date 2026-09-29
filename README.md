@@ -106,6 +106,13 @@ layer-rule {
 The panel reserves an exclusive zone, so niri lays windows out beneath it
 automatically.
 
+The application launcher starts ordinary `.desktop` `Exec=` applications in
+independent systemd user scopes, so restarting or stopping topbar does not stop
+the applications. This requires a running systemd **user** manager; if one is
+unavailable, the launcher reports the failed launch instead of starting an
+application that would die with the panel. D-Bus-activated applications remain
+owned by their D-Bus activator.
+
 The volume and brightness commands act on PulseAudio and logind **directly**
 and only then try to raise an OSD, so a media key still works when the panel is
 not running and when the configuration is broken.

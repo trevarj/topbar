@@ -777,22 +777,6 @@ wait_for_marker() {
   return 1
 }
 
-wait_for_terminal_launches() {
-  expected=$1
-  waited=0
-  while [ "$waited" -lt 20 ]; do
-    observed=$(grep -c '^terminal helper invoked$' "$terminal_log" 2>/dev/null || true)
-    if [ "$observed" -ge "$expected" ]; then
-      echo "terminal helper launched ${observed} time(s) after ${waited}s"
-      return 0
-    fi
-    sleep 1
-    waited=$((waited + 1))
-  done
-  echo "terminal helper launched fewer than ${expected} time(s)" >&2
-  return 1
-}
-
 wait_for_dbus_name() {
   waited=0
   while [ "$waited" -lt 20 ]; do
@@ -1062,46 +1046,43 @@ else
   fail=1
 fi
 key_press Return
-check assert_unmapped topbar-launcher "deep compact launcher result activates"
+check assert_mapped topbar-launcher "deep compact Exec result reports unavailable user manager"
+check hide_launcher
 
-echo "--- launcher terminal activation through private helper"
+echo "--- launcher Exec activation requires its own user manager"
+# The nested run has a private runtime directory and bus, never the developer's
+# user manager. An Exec launch must fail visibly rather than inherit the panel.
 check show_launcher
 type_text "Smoke Terminal"
 check shot launcher-terminal topbar-launcher
 key_press Return
-check wait_for_terminal_launches 1
-check assert_unmapped topbar-launcher "successful terminal launch closes launcher"
-# Enter always starts an application, including when a previous invocation of
-# that same desktop entry completed. It must not be converted into a focus-only
-# compositor action for terminal applications such as Kitty.
-check show_launcher
-type_text "Smoke Terminal"
-key_press Return
-check wait_for_terminal_launches 2
-check assert_unmapped topbar-launcher "repeat terminal launch closes launcher"
-cp "$terminal_log" "$art/terminal-launch.log" 2>/dev/null || true
+check assert_mapped topbar-launcher "unavailable user manager keeps launcher actionable"
+check shot launcher-scope-unavailable topbar-launcher
+if [ -e "$terminal_log" ]; then
+  echo "terminal helper ran outside a user scope" >&2
+  fail=1
+fi
+check hide_launcher
 
 echo "--- launcher private D-Bus activation"
-# The nested bus deliberately has no activation directories, because a GTK
-# portal lookup must not start host services.  Start this tiny Gio.Application
-# on that already-private bus instead.  The DBusActivatable entry below still
-# makes GIO send the real org.freedesktop.Application.Activate method, and the
-# helper writes its marker only from that method implementation.
-python3 "$dbus_helper" >"$art/dbus-service.stdout" 2>"$art/dbus-service.stderr" &
-dbus_pid=$!
-check wait_for_dbus_name
+# The nested bus has no user systemd manager. Even D-Bus activation must
+# remain in a scope, so the panel reports failure without contacting the app.
 check show_launcher
 type_text "Smoke D-Bus"
 check shot launcher-dbus-activatable topbar-launcher
 key_press Return
+check assert_mapped topbar-launcher "D-Bus activation requires its own user manager"
+check hide_launcher
+
+# Exercise the scoped helper's GIO D-Bus branch directly on this private bus.
+python3 "$dbus_helper" >"$art/dbus-service.stdout" 2>"$art/dbus-service.stderr" &
+dbus_pid=$!
+check wait_for_dbus_name
+check "$SMOKE_TOPBAR" launch-desktop io.github.topbar.SmokeDbus.desktop
 if ! wait_for_marker "$dbus_log" "private D-Bus application activation"; then
   fail=1
-  # Preserve GIO's inline error when a live bus service was not reached.
-  snap launcher-dbus-after-return 1 || true
-  # The fixture holds its bus name until terminated, even if activation fails.
   kill "$dbus_pid" 2>/dev/null || true
 fi
-check assert_unmapped topbar-launcher "successful D-Bus activation closes launcher"
 cp "$dbus_log" "$art/dbus-activation.log" 2>/dev/null || true
 wait "$dbus_pid" 2>/dev/null || true
 dbus_pid=""

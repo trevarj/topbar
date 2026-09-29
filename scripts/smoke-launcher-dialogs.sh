@@ -122,10 +122,9 @@ DESKTOP
   catalog_app=$((catalog_app + 1))
 done
 
-# GIO invokes this helper for a Terminal=true desktop entry.  It exists only
-# on the nested run's PATH, records no user data, and exits successfully so
-# the launch callback has an unambiguous success signal without opening a real
-# terminal on the developer's desktop.
+# Keep a fake terminal on the nested run's PATH. No user systemd manager is
+# available inside its private runtime directory, so its log must remain
+# absent: an Exec application must not launch under the panel's cgroup.
 printf '#!%s\n' "$shell_program" >"$fake_bin/xdg-terminal-exec"
 cat >>"$fake_bin/xdg-terminal-exec" <<'SH'
 set -eu

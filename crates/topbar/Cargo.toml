@@ -24,6 +24,7 @@ chrono-tz = { workspace = true }
 clap = { workspace = true }
 gtk4 = { workspace = true }
 gio = { workspace = true }
+gio-unix = "0.22"
 gtk4-layer-shell = { workspace = true }
 gdk4-wayland = { workspace = true }
 wayland-client = { workspace = true }
@@ -35,3 +36,4 @@ tracing = { workspace = true }
 libc = { workspace = true }
 tokio = { workspace = true }
 niri-ipc = { workspace = true }
+zbus = { workspace = true }

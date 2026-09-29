@@ -6,10 +6,13 @@
 //! what Enter means.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::process::Stdio;
 use std::rc::Rc;
 use std::time::SystemTime;
 
 use gio::prelude::*;
+use gio_unix::DesktopAppInfo;
 use gtk4::prelude::*;
 use gtk4::{
     Align, Button, Entry, Image, Label, Orientation, PolicyType, ScrolledWindow, Window, gdk, glib,
@@ -273,6 +276,7 @@ impl NavigationBounds {
 #[derive(Clone)]
 struct NavigationTarget {
     id: String,
+    window_labels: Option<(Label, Label)>,
     button: Button,
 }
 
@@ -352,6 +356,7 @@ struct Launcher {
     results: gtk4::Box,
     status: Label,
     section_statuses: RefCell<SectionStatusLabels>,
+    window_grid: RefCell<Option<gtk4::FlowBox>>,
     global_message: RefCell<Option<String>>,
     filter: Cell<Filter>,
     instance: u64,
@@ -484,6 +489,7 @@ impl Launcher {
             results,
             status,
             section_statuses: RefCell::new(SectionStatusLabels::default()),
+            window_grid: RefCell::new(None),
             global_message: RefCell::new(None),
             filter: Cell::new(Filter::All),
             instance: NEXT_INSTANCE.with(|next| {
@@ -635,8 +641,9 @@ impl Launcher {
             let launcher = Rc::downgrade(self);
             move |_, _| {
                 if let Some(launcher) = launcher.upgrade()
-                    && !launcher.search.text().is_empty()
-                    && matches!(launcher.filter.get(), Filter::All | Filter::Windows)
+                    && (launcher.filter.get() == Filter::Windows
+                        || (!launcher.search.text().is_empty()
+                            && launcher.filter.get() == Filter::All))
                 {
                     launcher.render();
                 }
@@ -812,20 +819,26 @@ impl Launcher {
                 self.config.appearance.wallpaper_command.is_some(),
             ],
         );
-        let same_results = self.drawn_query.borrow().as_deref() == Some(query.as_str())
-            && self.drawn_filter.get() == self.filter.get()
-            && *self.items.borrow() == items;
-        if same_results {
-            let messages =
-                section_messages(self.filter.get(), &query, &applications, &files, &windows);
-            if !section_structure_changed(
-                self.section_statuses.borrow().presence(),
-                section_presence(&items, &messages),
-            ) {
-                // A service metadata update must not replace buttons under the pointer.
-                self.update_status(&query, !items.is_empty(), &messages);
-                return;
-            }
+        let same_view = self.drawn_query.borrow().as_deref() == Some(query.as_str())
+            && self.drawn_filter.get() == self.filter.get();
+        let same_results = same_view && *self.items.borrow() == items;
+        let messages = section_messages(self.filter.get(), &query, &applications, &files, &windows);
+        let same_sections = !section_structure_changed(
+            self.section_statuses.borrow().presence(),
+            section_presence(&items, &messages),
+        );
+        if same_results && same_sections {
+            self.update_status(&query, !items.is_empty(), &messages);
+            return;
+        }
+        if same_view
+            && same_sections
+            && self.filter.get() == Filter::Windows
+            && self.reconcile_windows(&items)
+        {
+            self.items.replace(items);
+            self.update_status(&query, !self.items.borrow().is_empty(), &messages);
+            return;
         }
         *self.drawn_query.borrow_mut() = Some(query.clone());
         self.drawn_filter.set(self.filter.get());
@@ -886,21 +899,27 @@ impl Launcher {
             }
             output.extend(apps.into_iter().map(ResultItem::Application));
         }
-        if !query.is_empty() && wants(Filter::Actions) {
+        if wants(Filter::Actions) && (!query.is_empty() || filter == Filter::Actions) {
             for (item, enabled) in [
                 (ResultItem::Theme, enabled_actions[0]),
                 (ResultItem::Wallpaper, enabled_actions[1]),
             ] {
-                if enabled && rank_match(query, &item.title()).is_some() {
+                if enabled && (query.is_empty() || rank_match(query, &item.title()).is_some()) {
                     output.push(item);
                 }
             }
         }
-        if !query.is_empty() && wants(Filter::Windows) && windows.connected {
+        if wants(Filter::Windows)
+            && (!query.is_empty() || filter == Filter::Windows)
+            && windows.connected
+        {
             let mut matches = windows
                 .windows
                 .iter()
                 .filter_map(|window| {
+                    if query.is_empty() {
+                        return Some((0, window));
+                    }
                     let app_name = applications
                         .entries
                         .iter()
@@ -947,6 +966,91 @@ impl Launcher {
         output
     }
 
+    /// ponytail: update existing window buttons in place; rebuild only when
+    /// the Windows section appears or disappears.
+    fn reconcile_windows(&self, items: &[ResultItem]) -> bool {
+        let Some(grid) = self.window_grid.borrow().clone() else {
+            return false;
+        };
+        if items.is_empty() {
+            return false;
+        }
+        let order_changed = !self
+            .items
+            .borrow()
+            .iter()
+            .map(ResultItem::id)
+            .eq(items.iter().map(ResultItem::id));
+        let order: HashMap<_, _> = items
+            .iter()
+            .enumerate()
+            .map(|(position, item)| (item.id(), position))
+            .collect();
+        self.navigation_targets.borrow_mut().retain(|target| {
+            if order.contains_key(&target.id) {
+                return true;
+            }
+            if let Some(child) = target.button.parent() {
+                grid.remove(&child);
+            }
+            false
+        });
+        for item in items {
+            let id = item.id();
+            let target = self
+                .navigation_targets
+                .borrow()
+                .iter()
+                .find(|target| target.id == id)
+                .cloned();
+            if let Some(target) = target {
+                if !self.items.borrow().contains(item) {
+                    let (title, subtitle) = target.window_labels.as_ref().expect("window labels");
+                    title.set_markup(&highlight(&item.title(), &self.search.text()));
+                    subtitle.set_markup(&highlight(&item.subtitle(), &self.search.text()));
+                }
+            } else {
+                let button = self.item_button(item.clone(), false);
+                grid.insert(&button, -1);
+            }
+        }
+        if order_changed {
+            let positions: HashMap<_, _> = self
+                .navigation_targets
+                .borrow()
+                .iter()
+                .filter_map(|target| {
+                    order
+                        .get(&target.id)
+                        .map(|position| (target.button.as_ptr() as usize, *position))
+                })
+                .collect();
+            grid.set_sort_func(move |left, right| {
+                let position = |child: &gtk4::FlowBoxChild| {
+                    child
+                        .child()
+                        .and_then(|button| positions.get(&(button.as_ptr() as usize)).copied())
+                        .unwrap_or(usize::MAX)
+                };
+                position(left).cmp(&position(right)).into()
+            });
+        }
+        let old_id = self.selected_id.borrow().clone();
+        let targets = self.navigation_targets.borrow();
+        let selected = old_id
+            .as_deref()
+            .and_then(|id| targets.iter().find(|target| target.id == id))
+            .or_else(|| targets.iter().find(|target| target.id == items[0].id()));
+        let selected_id = selected.map(|target| {
+            target.button.add_css_class(classes::LAUNCHER_ITEM_SELECTED);
+            target.id.clone()
+        });
+        self.selected_index
+            .set(stable_index(items, selected_id.as_deref()));
+        *self.selected_id.borrow_mut() = selected_id;
+        true
+    }
+
     fn draw(
         &self,
         query: &str,
@@ -956,6 +1060,7 @@ impl Launcher {
     ) {
         self.scroll_motion.cancel();
         self.scroll_target.set(None);
+        self.window_grid.borrow_mut().take();
         while let Some(child) = self.results.first_child() {
             self.results.remove(&child);
         }
@@ -1107,6 +1212,9 @@ impl Launcher {
             let button = self.item_button(item, frequent);
             grid.insert(&button, -1);
         }
+        if section == Section::Windows {
+            *self.window_grid.borrow_mut() = Some(grid.clone());
+        }
         self.results.append(&grid);
     }
 
@@ -1182,7 +1290,19 @@ impl Launcher {
         button.connect_clicked(move |_| {
             CURRENT.with_borrow(|current| {
                 if let Some(launcher) = current.as_ref() {
-                    launcher.activate(click_item.clone());
+                    let current_item = if matches!(click_item, ResultItem::Window { .. }) {
+                        launcher
+                            .items
+                            .borrow()
+                            .iter()
+                            .find(|item| item.id() == click_item.id())
+                            .cloned()
+                    } else {
+                        Some(click_item.clone())
+                    };
+                    if let Some(item) = current_item {
+                        launcher.activate(item);
+                    }
                 }
             });
         });
@@ -1204,6 +1324,7 @@ impl Launcher {
         button.add_controller(secondary);
         self.navigation_targets.borrow_mut().push(NavigationTarget {
             id: navigation_id(&item, frequent),
+            window_labels: matches!(&item, ResultItem::Window { .. }).then_some((title, subtitle)),
             button: button.clone(),
         });
         button
@@ -1309,23 +1430,43 @@ impl Launcher {
             self.status.set_text("Application is no longer installed.");
             return;
         };
-        // The GDK context carries this layer surface's Wayland activation
-        // metadata, while GIO still handles Exec expansion, terminal apps and
-        // D-Bus activation.
         let context = gtk4::prelude::WidgetExt::display(&self.window).app_launch_context();
         let services = self.services.clone();
         let desktop_id = app.desktop_id.clone();
         let instance = self.instance;
-        info.launch_uris_async(&[], Some(&context), gio::Cancellable::NONE, move |result| {
-            match result {
-                Ok(()) => {
+
+        if info.downcast_ref::<DesktopAppInfo>().is_none() {
+            status_instance(instance, "Could not resolve application desktop entry.");
+            return;
+        }
+
+        // ponytail: every desktop entry launches in a user scope so GIO's
+        // possible Exec fallback cannot spawn from the panel's cgroup.
+        let token = context.startup_notify_id(Some(&info), &[]);
+        let scoped_id = desktop_id.clone();
+        let scoped_token = token.as_ref().map(ToString::to_string);
+        let answer = topbar_services::Runtime::handle().spawn(async move {
+            launch_scoped_application(scoped_id, scoped_token.as_deref()).await
+        });
+        glib::spawn_future_local(async move {
+            let outcome = answer.await;
+            if !matches!(&outcome, Ok(Ok(())))
+                && let Some(token) = token
+            {
+                context.launch_failed(&token);
+            }
+            match outcome {
+                Ok(Ok(())) => {
                     services
                         .launcher_usage
                         .record(&desktop_id, chrono::Utc::now().timestamp());
                     dismiss_instance(instance);
                 }
+                Ok(Err(error)) => {
+                    status_instance(instance, &format!("Could not launch application: {error}"));
+                }
                 Err(error) => {
-                    status_instance(instance, &format!("Could not launch application: {error}"))
+                    status_instance(instance, &format!("Could not launch application: {error}"));
                 }
             }
         });
@@ -1344,6 +1485,41 @@ impl Launcher {
                 Err(error) => status_instance(instance, &format!("Could not open file: {error}")),
             },
         );
+    }
+}
+
+async fn launch_scoped_application(desktop_id: String, token: Option<&str>) -> Result<(), String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("could not locate topbar executable: {error}"))?;
+    let mut command = tokio::process::Command::new("systemd-run");
+    command
+        .args([
+            "--user",
+            "--scope",
+            "--collect",
+            "--quiet",
+            "--expand-environment=no",
+            "--",
+        ])
+        .arg(executable)
+        .args(["launch-desktop", &desktop_id])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null());
+    if let Some(token) = token {
+        command.env("XDG_ACTIVATION_TOKEN", token);
+    }
+    // Inherit stderr rather than piping it: launched apps can inherit Gio's
+    // descriptors and must not be killed by a closed pipe after Gio exits.
+    let status = command
+        .status()
+        .await
+        .map_err(|error| format!("could not run systemd-run: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "user systemd launch failed ({status}); see topbar's log (a user systemd manager is required)"
+        ))
     }
 }
 
@@ -1523,8 +1699,16 @@ fn section_messages(
                 .or_else(|| applications.loading.then(|| "Applications are refreshing.".into()))
         })
         .flatten(),
-        windows: (!query.is_empty() && wants(Filter::Windows) && !windows.connected)
-            .then(|| "Window search is unavailable while niri reconnects.".into()),
+        windows: (wants(Filter::Windows)
+            && (!query.is_empty() || filter == Filter::Windows)
+            && !windows.connected)
+            .then(|| {
+                if query.is_empty() {
+                    "Windows are unavailable while niri reconnects.".into()
+                } else {
+                    "Window search is unavailable while niri reconnects.".into()
+                }
+            }),
         files: (!query.is_empty() && wants(Filter::Files))
             .then(|| {
                 files.warning.clone().or_else(|| {
@@ -1773,6 +1957,123 @@ mod tests {
             .map(ResultItem::id)
             .collect::<Vec<_>>(),
             ["action:theme"],
+        );
+    }
+
+    #[test]
+    fn blank_actions_tab_lists_only_configured_actions_without_changing_all() {
+        let applications = ApplicationsState {
+            entries: vec![Application {
+                desktop_id: "editor.desktop".into(),
+                name: "Editor".into(),
+                generic_name: None,
+                executable: "editor".into(),
+                keywords: Vec::new(),
+                aliases: Vec::new(),
+                icon: None,
+            }],
+            ..Default::default()
+        };
+        let windows = WindowsSnapshot::default();
+        let ids = |filter, enabled| {
+            Launcher::collect(filter, "", &applications, &windows, &[], enabled)
+                .iter()
+                .map(ResultItem::id)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            ids(Filter::Actions, [true, true]),
+            ["action:theme", "action:wallpaper"]
+        );
+        assert_eq!(ids(Filter::Actions, [true, false]), ["action:theme"]);
+        assert_eq!(ids(Filter::Actions, [false, true]), ["action:wallpaper"]);
+        assert!(ids(Filter::Actions, [false, false]).is_empty());
+        assert_eq!(ids(Filter::All, [true, true]), ["app:editor.desktop"]);
+    }
+
+    #[test]
+    fn blank_windows_tab_tracks_open_windows_without_changing_all() {
+        let applications = ApplicationsState {
+            entries: vec![Application {
+                desktop_id: "editor.desktop".into(),
+                name: "Editor".into(),
+                generic_name: None,
+                executable: "editor".into(),
+                keywords: Vec::new(),
+                aliases: Vec::new(),
+                icon: None,
+            }],
+            ..Default::default()
+        };
+        let mut windows = WindowsSnapshot {
+            connected: true,
+            windows: vec![topbar_services::WindowView {
+                id: 42,
+                app_id: "editor".into(),
+                title: "Draft".into(),
+                workspace: Some("work".into()),
+                output: Some("HDMI-A-1".into()),
+                focused_at_ms: None,
+            }],
+        };
+        let ids = |filter, windows: &WindowsSnapshot| {
+            Launcher::collect(filter, "", &applications, windows, &[], [true, true])
+                .iter()
+                .map(ResultItem::id)
+                .collect::<Vec<_>>()
+        };
+        let items = Launcher::collect(
+            Filter::Windows,
+            "",
+            &applications,
+            &windows,
+            &[],
+            [true, true],
+        );
+        assert_eq!(
+            items.iter().map(ResultItem::id).collect::<Vec<_>>(),
+            ["window:42"]
+        );
+        assert!(
+            matches!(&items[0], ResultItem::Window { title, context, .. }
+            if title == "Draft" && context == "work · HDMI-A-1")
+        );
+        assert_eq!(ids(Filter::All, &windows), ["app:editor.desktop"]);
+
+        windows.windows.push(topbar_services::WindowView {
+            id: 7,
+            app_id: "browser".into(),
+            title: "Browser".into(),
+            workspace: None,
+            output: None,
+            focused_at_ms: None,
+        });
+        assert_eq!(ids(Filter::Windows, &windows), ["window:7", "window:42"]);
+        windows.connected = false;
+        assert!(ids(Filter::Windows, &windows).is_empty());
+        assert_eq!(
+            section_messages(
+                Filter::Windows,
+                "",
+                &applications,
+                &FileSearchState::default(),
+                &windows
+            )
+            .windows
+            .as_deref(),
+            Some("Windows are unavailable while niri reconnects.")
+        );
+        assert_eq!(
+            section_messages(
+                Filter::All,
+                "",
+                &applications,
+                &FileSearchState::default(),
+                &windows
+            )
+            .windows,
+            None
         );
     }
 
