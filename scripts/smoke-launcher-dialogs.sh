@@ -33,6 +33,9 @@ fake_bin="$fixtures/bin"
 shell_program=$(command -v sh)
 terminal_log="$fixtures/terminal-launch.log"
 dbus_log="$fixtures/dbus-activation.log"
+exec_log="$fixtures/exec-launch.log"
+persist_pid="$fixtures/persistent.pid"
+persist_release="$fixtures/persistent.release"
 failing_exec="$fixtures/failing-launch"
 catalog_root="$file_root/catalog"
 stage_256="$fixtures/emit-256"
@@ -46,7 +49,7 @@ Type=Application
 Name=Smoke Editor
 GenericName=Fixture text editor
 Comment=Deterministic launcher application fixture
-Exec=true
+Exec=smoke-exec editor
 Icon=accessories-text-editor
 Keywords=smoke;editor;write;
 StartupWMClass=TopbarSmokeEditor
@@ -95,10 +98,29 @@ cat >"$data_root/applications/io.github.topbar.SmokeDbus.desktop" <<'DESKTOP'
 [Desktop Entry]
 Type=Application
 Name=Smoke D-Bus
-Comment=Private session-bus activation fixture
-Exec=false
+Exec=smoke-exec dbus
 Icon=applications-system
 DBusActivatable=true
+Terminal=false
+DESKTOP
+
+cat >"$data_root/applications/io.github.topbar.SmokeUnlaunchable.desktop" <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Smoke Unlaunchable
+Comment=DBusActivatable without Exec must report a local error
+Icon=dialog-error
+DBusActivatable=true
+Terminal=false
+DESKTOP
+
+cat >"$data_root/applications/io.github.topbar.SmokePersistent.desktop" <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Smoke Persistent
+Comment=Exec child must live past the panel
+Exec=smoke-exec persistent
+Icon=applications-system
 Terminal=false
 DESKTOP
 
@@ -122,9 +144,7 @@ DESKTOP
   catalog_app=$((catalog_app + 1))
 done
 
-# Keep a fake terminal on the nested run's PATH. No user systemd manager is
-# available inside its private runtime directory, so its log must remain
-# absent: an Exec application must not launch under the panel's cgroup.
+# Keep fake executables on the nested run's PATH and record inherited variables.
 printf '#!%s\n' "$shell_program" >"$fake_bin/xdg-terminal-exec"
 cat >>"$fake_bin/xdg-terminal-exec" <<'SH'
 set -eu
@@ -134,6 +154,17 @@ for argument in "$@"; do
 done
 SH
 chmod 700 "$fake_bin/xdg-terminal-exec"
+
+printf '#!%s\n' "$shell_program" >"$fake_bin/smoke-exec"
+cat >>"$fake_bin/smoke-exec" <<'SH'
+set -eu
+printf '%s: %s\n' "$1" "$SMOKE_LAUNCHER_INHERITED" >>"$SMOKE_LAUNCHER_EXEC_LOG"
+if [ "$1" = persistent ]; then
+  printf '%s\n' "$$" >"$SMOKE_LAUNCHER_PERSIST_PID"
+  while [ ! -e "$SMOKE_LAUNCHER_PERSIST_RELEASE" ]; do sleep 0.1; done
+fi
+SH
+chmod 700 "$fake_bin/smoke-exec"
 
 printf 'This document is deliberately discoverable by the launcher.\n' \
   >"$file_root/smoke-document.txt"
@@ -463,6 +494,10 @@ run_harness() {
   SMOKE_LAUNCHER_STAGE_512="$stage_512" \
   SMOKE_LAUNCHER_FD_LOG="$fd_log" \
   SMOKE_LAUNCHER_TERMINAL_LOG="$terminal_log" \
+  SMOKE_LAUNCHER_EXEC_LOG="$exec_log" \
+  SMOKE_LAUNCHER_INHERITED=from-niri-child \
+  SMOKE_LAUNCHER_PERSIST_PID="$persist_pid" \
+  SMOKE_LAUNCHER_PERSIST_RELEASE="$persist_release" \
   SMOKE_LAUNCHER_FAILING_EXEC="$failing_exec" \
   SMOKE_LAUNCHER_DBUS_LOG="$dbus_log" \
   SMOKE_LAUNCHER_DBUS_HELPER="$repo/scripts/smoke-dbus-application.py" \
@@ -500,7 +535,7 @@ for transcript in "$artifact_root"/pinentry-*.protocol \
   echo "=== $transcript ==="
   sed -n '1,80p' "$transcript"
 done
-echo "--- D-Bus activation ---"
-cat "$artifact_root"/fixtures.*/dbus-activation.log 2>/dev/null || true
+echo "--- Exec launches ---"
+cat "$artifact_root"/fixtures.*/exec-launch.log 2>/dev/null || true
 
 exit "$status"

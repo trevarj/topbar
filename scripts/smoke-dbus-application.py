@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Private-bus org.freedesktop.Application fixture for launcher smoke runs.
+"""Private-bus org.freedesktop.Application guard for launcher smoke runs.
 
-Gio.Application exports the standard application interface itself.  The smoke
-driver starts it only inside the nested dbus-run-session, then the marker is
-written after the real Activate call arrives.  It never opens a system-bus
-connection and exits shortly after handling one activation.
+It owns the desktop entry's well-known name so that accidental D-Bus Activate
+calls are recorded. The launcher must instead run that entry's Exec command.
+The driver kills this guard after checking the absence of an activation log.
 """
 
 import os
@@ -34,8 +33,7 @@ class SmokeApplication(Gio.Application):
 
     def do_startup(self) -> None:
         Gio.Application.do_startup(self)
-        # A settled nested screenshot can take longer than Gio's idle service
-        # timeout. Keep the fixture available until the launcher activates it.
+        # Keep the guard available throughout the nested launcher interaction.
         self.hold()
 
     def do_activate(self) -> None:

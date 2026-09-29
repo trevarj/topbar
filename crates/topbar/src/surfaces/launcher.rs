@@ -7,7 +7,6 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::process::Stdio;
 use std::rc::Rc;
 use std::time::SystemTime;
 
@@ -853,6 +852,15 @@ impl Launcher {
             .iter()
             .find(|target| Some(target.id.as_str()) == old_id.as_deref())
             .or_else(|| {
+                // A blank view with no retained selection starts at Frequent,
+                // even when it repeats an application in the ordinary grid.
+                (query.is_empty()
+                    && matches!(self.filter.get(), Filter::All | Filter::Applications))
+                .then(|| targets.first())
+                .flatten()
+                .filter(|target| target.id.starts_with("frequent:"))
+            })
+            .or_else(|| {
                 targets
                     .iter()
                     .find(|target| Some(target.id.as_str()) == fallback_id.as_deref())
@@ -1452,40 +1460,30 @@ impl Launcher {
             self.status.set_text("Application is no longer installed.");
             return;
         };
+        let Some(info) = info.downcast_ref::<DesktopAppInfo>() else {
+            self.status
+                .set_text("Could not resolve application desktop entry.");
+            return;
+        };
+        let info = info.clone();
         let context = gtk4::prelude::WidgetExt::display(&self.window).app_launch_context();
         let services = self.services.clone();
         let desktop_id = app.desktop_id.clone();
         let instance = self.instance;
-
-        if info.downcast_ref::<DesktopAppInfo>().is_none() {
-            status_instance(instance, "Could not resolve application desktop entry.");
-            return;
-        }
-
-        // ponytail: every desktop entry launches in a user scope so GIO's
-        // possible Exec fallback cannot spawn from the panel's cgroup.
-        let token = context.startup_notify_id(Some(&info), &[]);
-        let scoped_id = desktop_id.clone();
-        let scoped_token = token.as_ref().map(ToString::to_string);
-        let answer = topbar_services::Runtime::handle().spawn(async move {
-            launch_scoped_application(scoped_id, scoped_token.as_deref()).await
-        });
         glib::spawn_future_local(async move {
-            let outcome = answer.await;
-            if !matches!(&outcome, Ok(Ok(())))
-                && let Some(token) = token
-            {
-                context.launch_failed(&token);
-            }
+            let outcome = match exec_app_info(&info).await {
+                Ok(exec_info) => exec_info
+                    .launch_uris_future(&[], Some(&context))
+                    .await
+                    .map_err(|error| error.to_string()),
+                Err(error) => Err(error),
+            };
             match outcome {
-                Ok(Ok(())) => {
+                Ok(()) => {
                     services
                         .launcher_usage
                         .record(&desktop_id, chrono::Utc::now().timestamp());
                     dismiss_instance(instance);
-                }
-                Ok(Err(error)) => {
-                    status_instance(instance, &format!("Could not launch application: {error}"));
                 }
                 Err(error) => {
                     status_instance(instance, &format!("Could not launch application: {error}"));
@@ -1510,39 +1508,43 @@ impl Launcher {
     }
 }
 
-async fn launch_scoped_application(desktop_id: String, token: Option<&str>) -> Result<(), String> {
-    let executable = std::env::current_exe()
-        .map_err(|error| format!("could not locate topbar executable: {error}"))?;
-    let mut command = tokio::process::Command::new("systemd-run");
-    command
-        .args([
-            "--user",
-            "--scope",
-            "--collect",
-            "--quiet",
-            "--expand-environment=no",
-            "--",
-        ])
-        .arg(executable)
-        .args(["launch-desktop", &desktop_id])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null());
-    if let Some(token) = token {
-        command.env("XDG_ACTIVATION_TOKEN", token);
+/// GIO normally selects D-Bus activation for DBusActivatable entries. Rebuild
+/// those entries with just that flag disabled so GIO still parses Exec and
+/// Terminal and provides startup notification, but launches a child. GIO's
+/// keyfile constructor does not retain a filename, so %k is unavailable here.
+async fn exec_app_info(info: &DesktopAppInfo) -> Result<DesktopAppInfo, String> {
+    if !info.boolean("DBusActivatable") {
+        return Ok(info.clone());
     }
-    // Inherit stderr rather than piping it: launched apps can inherit Gio's
-    // descriptors and must not be killed by a closed pipe after Gio exits.
-    let status = command
-        .status()
+    let filename = info
+        .filename()
+        .ok_or("Application desktop entry has no filename")?;
+    let (contents, _) = gio::File::for_path(&filename)
+        .load_contents_future()
         .await
-        .map_err(|error| format!("could not run systemd-run: {error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "user systemd launch failed ({status}); see topbar's log (a user systemd manager is required)"
-        ))
+        .map_err(|error| format!("Could not read {}: {error}", filename.display()))?;
+    let key_file = glib::KeyFile::new();
+    key_file
+        .load_from_data(
+            std::str::from_utf8(&contents).map_err(|error| {
+                format!("Invalid desktop entry {}: {error}", filename.display())
+            })?,
+            glib::KeyFileFlags::NONE,
+        )
+        .map_err(|error| format!("Invalid desktop entry {}: {error}", filename.display()))?;
+    if !key_file
+        .string("Desktop Entry", "Exec")
+        .is_ok_and(|exec| !exec.trim().is_empty())
+    {
+        return Err(format!("No Exec command in {}", filename.display()));
     }
+    key_file.set_boolean("Desktop Entry", "DBusActivatable", false);
+    DesktopAppInfo::from_keyfile(&key_file).ok_or_else(|| {
+        format!(
+            "Could not load application desktop entry {}",
+            filename.display()
+        )
+    })
 }
 
 fn app_menu(anchor: &gtk4::Widget, app: Application) {
@@ -1920,6 +1922,75 @@ async fn run_appearance(command: Option<Vec<String>>) -> Result<(), topbar_servi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_exec_launches_even_when_dbus_activatable_and_preserves_normal_percent_k() {
+        let root = std::env::temp_dir().join(format!(
+            "topbar-desktop-exec-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let executable = root.join("record");
+        std::fs::write(&executable, "printf '%s' \"$1\" > \"$2\"\n").unwrap();
+        let context = glib::MainContext::new();
+        let main_loop = glib::MainLoop::new(Some(&context), false);
+        let root_for_launch = root.clone();
+        let loop_for_launch = main_loop.clone();
+        context
+            .with_thread_default(|| {
+                context.spawn_local(async move {
+                    for (name, activatable, argument) in [
+                        ("org.example.Direct", true, "exec-not-dbus"),
+                        ("org.example.Normal", false, "%k"),
+                    ] {
+                        let desktop = root_for_launch.join(format!("{name}.desktop"));
+                        let marker = root_for_launch.join(format!("{name}.marker"));
+                        std::fs::write(
+                            &desktop,
+                            format!(
+                                "[Desktop Entry]\nType=Application\nName={name}\nExec=sh {} {argument} {}\nDBusActivatable={activatable}\n",
+                                glib::shell_quote(&executable).to_string_lossy(),
+                                glib::shell_quote(&marker).to_string_lossy(),
+                            ),
+                        )
+                        .unwrap();
+                        let info = DesktopAppInfo::from_filename(&desktop).unwrap();
+                        exec_app_info(&info)
+                            .await
+                            .unwrap()
+                            .launch_uris_future(&[], gio::AppLaunchContext::NONE)
+                            .await
+                            .unwrap();
+                        // GIO reports a successful spawn, not that the child has
+                        // already written its output.
+                        let mut actual = None;
+                        for _ in 0..100 {
+                            actual = std::fs::read_to_string(&marker).ok();
+                            if actual.is_some() {
+                                break;
+                            }
+                            glib::timeout_future(std::time::Duration::from_millis(10)).await;
+                        }
+                        assert_eq!(
+                            actual.as_deref(),
+                            Some(if activatable {
+                                "exec-not-dbus"
+                            } else {
+                                desktop.to_str().unwrap()
+                            })
+                        );
+                    }
+                    loop_for_launch.quit();
+                });
+                main_loop.run();
+            })
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn normalizes_only_explicit_desktop_identity_variants() {

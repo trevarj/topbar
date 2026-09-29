@@ -19,18 +19,22 @@ stage_256="$SMOKE_LAUNCHER_STAGE_256"
 stage_512="$SMOKE_LAUNCHER_STAGE_512"
 terminal_log="$SMOKE_LAUNCHER_TERMINAL_LOG"
 dbus_log="$SMOKE_LAUNCHER_DBUS_LOG"
-dbus_helper="$SMOKE_LAUNCHER_DBUS_HELPER"
+exec_log="$SMOKE_LAUNCHER_EXEC_LOG"
+persist_pid="$SMOKE_LAUNCHER_PERSIST_PID"
+persist_release="$SMOKE_LAUNCHER_PERSIST_RELEASE"
 
 chooser_pid=""
 queued_chooser_pid=""
 pinentry_pid=""
+persistent_child=""
 dbus_pid=""
-
 cleanup() {
   [ -z "$chooser_pid" ] || kill "$chooser_pid" 2>/dev/null || true
   [ -z "$queued_chooser_pid" ] || kill "$queued_chooser_pid" 2>/dev/null || true
   [ -z "$pinentry_pid" ] || kill "$pinentry_pid" 2>/dev/null || true
+  [ -z "$persistent_child" ] || kill "$persistent_child" 2>/dev/null || true
   [ -z "$dbus_pid" ] || kill "$dbus_pid" 2>/dev/null || true
+  touch "$persist_release"
 }
 trap cleanup EXIT INT TERM
 
@@ -777,6 +781,21 @@ wait_for_marker() {
   return 1
 }
 
+wait_for_exec() {
+  expected=$1
+  waited=0
+  while [ "$waited" -lt 20 ]; do
+    if grep -qx "$expected" "$exec_log" 2>/dev/null; then
+      echo "Exec $expected observed after ${waited}s"
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  echo "Exec $expected was never observed" >&2
+  return 1
+}
+
 wait_for_dbus_name() {
   waited=0
   while [ "$waited" -lt 20 ]; do
@@ -947,6 +966,12 @@ check wait_for_launcher_blur "$blur_before"
 check shot launcher-clear-blur topbar-launcher
 check assert_launcher_backdrop_layers
 cp "$art/launcher-clear-blur.png" "$art/launcher-frequent.png"
+# The seeded frequent app is Smoke Editor, whereas the ordinary grid begins
+# with a catalog entry. Enter without typing must launch the frequent tile.
+key_press Return
+check assert_unmapped topbar-launcher "default selection launches first frequent application"
+check wait_for_exec "editor: from-niri-child"
+check show_launcher
 type_text "Smoke Editor"
 check shot launcher-applications topbar-launcher
 key_press Escape
@@ -1046,46 +1071,59 @@ else
   fail=1
 fi
 key_press Return
-check assert_mapped topbar-launcher "deep compact Exec result reports unavailable user manager"
-check hide_launcher
+check assert_unmapped topbar-launcher "deep compact Exec result closes launcher"
 
-echo "--- launcher Exec activation requires its own user manager"
-# The nested run has a private runtime directory and bus, never the developer's
-# user manager. An Exec launch must fail visibly rather than inherit the panel.
+echo "--- launcher Terminal Exec"
 check show_launcher
 type_text "Smoke Terminal"
 check shot launcher-terminal topbar-launcher
 key_press Return
-check assert_mapped topbar-launcher "unavailable user manager keeps launcher actionable"
-check shot launcher-scope-unavailable topbar-launcher
-if [ -e "$terminal_log" ]; then
-  echo "terminal helper ran outside a user scope" >&2
-  fail=1
-fi
-check hide_launcher
+check assert_unmapped topbar-launcher "Terminal entry launches"
+check wait_for_marker "$terminal_log" "terminal helper"
 
-echo "--- launcher private D-Bus activation"
-# The nested bus has no user systemd manager. Even D-Bus activation must
-# remain in a scope, so the panel reports failure without contacting the app.
+echo "--- launcher DBusActivatable uses Exec, not Activate"
+python3 "$dbus_helper" >"$art/dbus-service.stdout" 2>"$art/dbus-service.stderr" &
+dbus_pid=$!
+check wait_for_dbus_name
 check show_launcher
 type_text "Smoke D-Bus"
 check shot launcher-dbus-activatable topbar-launcher
 key_press Return
-check assert_mapped topbar-launcher "D-Bus activation requires its own user manager"
-check hide_launcher
-
-# Exercise the scoped helper's GIO D-Bus branch directly on this private bus.
-python3 "$dbus_helper" >"$art/dbus-service.stdout" 2>"$art/dbus-service.stderr" &
-dbus_pid=$!
-check wait_for_dbus_name
-check "$SMOKE_TOPBAR" launch-desktop io.github.topbar.SmokeDbus.desktop
-if ! wait_for_marker "$dbus_log" "private D-Bus application activation"; then
+check assert_unmapped topbar-launcher "DBusActivatable Exec launches"
+check wait_for_exec "dbus: from-niri-child"
+if [ -e "$dbus_log" ]; then
+  echo "DBusActivatable entry unexpectedly called Activate" >&2
   fail=1
-  kill "$dbus_pid" 2>/dev/null || true
 fi
-cp "$dbus_log" "$art/dbus-activation.log" 2>/dev/null || true
+kill "$dbus_pid" 2>/dev/null || true
 wait "$dbus_pid" 2>/dev/null || true
 dbus_pid=""
+
+echo "--- launcher DBusActivatable without Exec fails visibly"
+check show_launcher
+type_text "Smoke Unlaunchable"
+key_press Return
+check assert_mapped topbar-launcher "DBusActivatable without Exec keeps launcher actionable"
+check shot launcher-missing-exec topbar-launcher
+check hide_launcher
+
+echo "--- launcher persistent Exec child"
+check show_launcher
+type_text "Smoke Persistent"
+key_press Return
+check assert_unmapped topbar-launcher "persistent Exec launches"
+check wait_for_exec "persistent: from-niri-child"
+check wait_for_marker "$persist_pid" "persistent Exec PID"
+if [ -s "$persist_pid" ]; then
+  persistent_child=$(cat "$persist_pid")
+fi
+case "$persistent_child" in
+  "" | *[!0-9]*) echo "persistent Exec did not report a PID" >&2; fail=1 ;;
+  *) if ! kill -0 "$persistent_child" 2>/dev/null; then
+       echo "persistent Exec exited before panel shutdown" >&2
+       fail=1
+     fi ;;
+esac
 
 echo "--- launcher hidden and failing desktop entries"
 # NoDisplay is GIO's visibility contract.  The exact query has no other
@@ -1197,6 +1235,11 @@ niri msg layers >"$art/launcher-layers.txt" 2>&1 || true
 echo "--- stop panel before standalone dialogs"
 kill "$SMOKE_PANEL_PID" 2>/dev/null || true
 wait "$SMOKE_PANEL_PID" 2>/dev/null || true
+if [ -n "$persistent_child" ] && ! kill -0 "$persistent_child" 2>/dev/null; then
+  echo "persistent Exec died when the panel exited" >&2
+  fail=1
+fi
+touch "$persist_release"
 
 echo "--- standalone dark and light theme choosers"
 check start_chooser themes-dark "$SMOKE_CONFIG" themes moonlight "$theme_json"

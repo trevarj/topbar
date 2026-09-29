@@ -106,12 +106,13 @@ layer-rule {
 The panel reserves an exclusive zone, so niri lays windows out beneath it
 automatically.
 
-The application launcher starts ordinary `.desktop` `Exec=` applications in
-independent systemd user scopes, so restarting or stopping topbar does not stop
-the applications. This requires a running systemd **user** manager; if one is
-unavailable, the launcher reports the failed launch instead of starting an
-application that would die with the panel. D-Bus-activated applications remain
-owned by their D-Bus activator.
+The application launcher uses GIO to fork `.desktop` `Exec=` commands directly
+from the panel started by niri. Apps inherit niri's child environment and keep
+running when topbar exits. `DBusActivatable` tiles use their `Exec=` instead of
+requesting D-Bus activation; entries without a usable `Exec=` report an error.
+GIO handles Terminal entries, startup notification and desktop field codes.
+For a `DBusActivatable` entry, GIO's in-memory keyfile constructor cannot
+expand `%k` (the desktop-file path); ordinary desktop entries retain `%k`.
 
 The volume and brightness commands act on PulseAudio and logind **directly**
 and only then try to raise an OSD, so a media key still works when the panel is

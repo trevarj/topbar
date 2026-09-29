@@ -21,13 +21,9 @@
 //! succeeded whether or not anybody drew a picture of it — so it exits zero and
 //! says nothing, which is what a key pressed sixty times an hour should do.
 
-use std::cell::Cell;
-use std::collections::HashMap;
 use std::path::Path;
 use std::process::ExitCode;
-use std::rc::Rc;
 
-use gio::prelude::*;
 use topbar_core::config::{Config, EXAMPLE_CONFIG_TOML};
 use topbar_core::ipc::{self, IpcRequest, IpcResponse};
 use topbar_services::Runtime;
@@ -37,19 +33,12 @@ use topbar_services::brightness::DEFAULT_STEP as BRIGHTNESS_STEP;
 use topbar_services::brightness::cli::BrightnessCli;
 use topbar_services::media::cli::{self as media_cli, Control};
 use tracing::debug;
-use zbus::zvariant::Value;
 
 use crate::cli::{
     BrightnessAction, Command, DumpAction, InhibitAction, MediaAction, PopoverAction,
     VisibilityAction, VolumeAction,
 };
 use crate::ipc_client;
-
-/// The desktop-entry activation interface; keep the wire signature typed.
-#[zbus::proxy(interface = "org.freedesktop.Application", assume_defaults = false)]
-trait Application {
-    fn activate(&self, platform_data: HashMap<&str, Value<'_>>) -> zbus::Result<()>;
-}
 
 /// Run a subcommand instead of starting the panel.
 pub fn run(command: Command, config_path: Option<&Path>) -> ExitCode {
@@ -69,7 +58,6 @@ pub fn run(command: Command, config_path: Option<&Path>) -> ExitCode {
         Command::Launcher { action } => through_panel(&IpcRequest::Launcher {
             action: visibility(action),
         }),
-        Command::LaunchDesktop { desktop_id } => launch_desktop(&desktop_id),
         Command::Choose {
             layout,
             title,
@@ -88,93 +76,6 @@ pub fn run(command: Command, config_path: Option<&Path>) -> ExitCode {
         Command::Reload => through_panel(&IpcRequest::Reload),
         Command::Dump { action, json } => dump(action, json),
     }
-}
-
-fn launch_desktop(desktop_id: &str) -> ExitCode {
-    let Some(info) = gio_unix::DesktopAppInfo::new(desktop_id) else {
-        eprintln!("Could not find application desktop ID: {desktop_id}");
-        return ExitCode::FAILURE;
-    };
-    match launch_desktop_info(&info) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("Could not launch {desktop_id}: {error}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
-fn launch_desktop_info(info: &gio_unix::DesktopAppInfo) -> Result<(), String> {
-    if let Some(name) = dbus_application_name(info) {
-        let token = std::env::var("XDG_ACTIVATION_TOKEN").ok();
-        return Runtime::handle()
-            .block_on(async {
-                let connection = zbus::Connection::session().await?;
-                activate_desktop(&connection, &name, token.as_deref()).await
-            })
-            .map_err(|error| error.to_string());
-    }
-
-    launch_exec(info).map_err(|error| error.to_string())
-}
-
-fn dbus_application_name(info: &gio_unix::DesktopAppInfo) -> Option<String> {
-    if !info.boolean("DBusActivatable") {
-        return None;
-    }
-    // GIO uses the *filename*, not the desktop ID (which includes nested
-    // directory prefixes), to derive the well-known D-Bus name.
-    let filename = info.filename()?;
-    let name = filename.file_name()?.to_str()?.strip_suffix(".desktop")?;
-    zbus::names::WellKnownName::try_from(name).ok()?;
-    Some(name.to_owned())
-}
-
-async fn activate_desktop(
-    connection: &zbus::Connection,
-    name: &str,
-    token: Option<&str>,
-) -> zbus::Result<()> {
-    let mut path = String::with_capacity(name.len() + 1);
-    path.push('/');
-    path.extend(name.chars().map(|ch| match ch {
-        '.' => '/',
-        '-' => '_',
-        ch => ch,
-    }));
-    let proxy = ApplicationProxy::builder(connection)
-        .destination(name)?
-        .path(path)?
-        .build()
-        .await?;
-    let mut platform_data = HashMap::new();
-    if let Some(token) = token.filter(|token| !token.is_empty()) {
-        platform_data.insert("activation-token", Value::from(token));
-        platform_data.insert("desktop-startup-id", Value::from(token));
-    }
-    proxy.activate(platform_data).await
-}
-
-fn launch_exec(info: &gio_unix::DesktopAppInfo) -> Result<(), gio::glib::Error> {
-    // Keep the scoped helper alive until asynchronous GIO launch has finished;
-    // the synchronous API can report success before Exec launch fails.
-    let context = gio::glib::MainContext::new();
-    context
-        .with_thread_default(|| {
-            let main_loop = gio::glib::MainLoop::new(Some(&context), false);
-            let outcome = Rc::new(Cell::new(None));
-            info.launch_uris_async(&[], gio::AppLaunchContext::NONE, gio::Cancellable::NONE, {
-                let main_loop = main_loop.clone();
-                let outcome = outcome.clone();
-                move |result| {
-                    outcome.set(Some(result));
-                    main_loop.quit();
-                }
-            });
-            main_loop.run();
-            outcome.take().expect("GIO launch completed")
-        })
-        .expect("new GIO main context is available")
 }
 
 // ---------------------------------------------------------------------------
@@ -426,137 +327,6 @@ fn popover(action: PopoverAction) -> ipc::PopoverAction {
 mod tests {
     use super::*;
     use topbar_services::audio::max_volume_percent;
-
-    struct PrivateBus(std::process::Child);
-
-    impl Drop for PrivateBus {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-
-    struct FakeApplication(std::sync::mpsc::Sender<HashMap<String, zbus::zvariant::OwnedValue>>);
-
-    #[zbus::interface(name = "org.freedesktop.Application")]
-    impl FakeApplication {
-        fn activate(&self, platform_data: HashMap<String, zbus::zvariant::OwnedValue>) {
-            self.0.send(platform_data).expect("test is receiving");
-        }
-    }
-
-    #[test]
-    fn dbus_activation_sends_the_parent_token_to_the_filename_derived_application() {
-        use std::io::BufRead;
-
-        let mut command = std::process::Command::new("dbus-daemon");
-        if let Some(config) = std::env::var_os("TOPBAR_TEST_DBUS_CONFIG") {
-            command.arg("--config-file").arg(config);
-        } else {
-            command.arg("--session");
-        }
-        let Ok(mut child) = command
-            .args(["--print-address", "--nofork"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        else {
-            eprintln!("skipping: no dbus-daemon available");
-            return;
-        };
-        let mut address = String::new();
-        let read = std::io::BufReader::new(child.stdout.take().unwrap()).read_line(&mut address);
-        let _bus = PrivateBus(child);
-        if read.is_err() || !address.starts_with("unix:") {
-            eprintln!("skipping: private bus unavailable");
-            return;
-        }
-        let root = std::env::temp_dir().join(format!(
-            "topbar-token-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let path = root.join("nested/org.example.Token-Test.desktop");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &path,
-            "[Desktop Entry]\nType=Application\nName=Example\nExec=true\nDBusActivatable=true\n",
-        )
-        .unwrap();
-        let info = gio_unix::DesktopAppInfo::from_filename(&path).unwrap();
-        let name = dbus_application_name(&info).expect("valid filename-derived name");
-        assert_eq!(name, "org.example.Token-Test");
-
-        Runtime::handle().block_on(async {
-            let (tx, rx) = std::sync::mpsc::channel();
-            let server = zbus::connection::Builder::address(address.trim())
-                .unwrap()
-                .name(name.as_str())
-                .unwrap()
-                .serve_at("/org/example/Token_Test", FakeApplication(tx))
-                .unwrap()
-                .build()
-                .await
-                .unwrap();
-            let client = zbus::connection::Builder::address(address.trim())
-                .unwrap()
-                .build()
-                .await
-                .unwrap();
-            activate_desktop(&client, &name, Some("test-wayland-activation-token"))
-                .await
-                .unwrap();
-            let data = rx.try_recv().expect("application received Activate");
-            for key in ["activation-token", "desktop-startup-id"] {
-                assert_eq!(
-                    String::try_from(data[key].try_clone().unwrap()).unwrap(),
-                    "test-wayland-activation-token"
-                );
-            }
-            drop(server);
-        });
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn scoped_helper_waits_for_real_desktop_launch_errors() {
-        let root = std::env::temp_dir().join(format!(
-            "topbar-launch-desktop-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        for (relative, activatable) in [
-            ("org.example.App.desktop", false),
-            ("org.example/app.desktop", true),
-            ("1nested/org.example.App.desktop", false),
-        ] {
-            let path = root.join(relative);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(
-                &path,
-                format!(
-                    "[Desktop Entry]\nType=Application\nName=Example\nExec=true\nPath={}\nDBusActivatable={activatable}\n",
-                    root.join("missing").display()
-                ),
-            )
-            .unwrap();
-            let info = gio_unix::DesktopAppInfo::from_filename(&path)
-                .unwrap_or_else(|| panic!("invalid desktop fixture: {}", path.display()));
-            assert_eq!(
-                dbus_application_name(&info),
-                None,
-                "{relative} must use GIO Exec fallback"
-            );
-            assert!(launch_desktop_info(&info).is_err(), "{relative}");
-        }
-        std::fs::remove_dir_all(root).unwrap();
-    }
 
     #[test]
     fn an_omitted_step_is_five_points() {

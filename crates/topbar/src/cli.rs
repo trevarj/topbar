@@ -100,12 +100,6 @@ pub enum Command {
         #[arg(long, requires = "layout")]
         wallpaper_provider: Option<std::path::PathBuf>,
     },
-    /// Launch a desktop application from a user scope (internal).
-    #[command(hide = true)]
-    LaunchDesktop {
-        /// Desktop file ID as resolved by GIO.
-        desktop_id: String,
-    },
     /// Serve the GnuPG pinentry protocol on standard input and output.
     Pinentry,
     /// Re-read the configuration and apply what changed

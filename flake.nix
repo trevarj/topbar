@@ -96,7 +96,6 @@
               --prefix PATH : "${
                 lib.makeBinPath [
                   pkgs.fd
-                  pkgs.systemd
                   pkgs.xdg-terminal-exec
                 ]
               }"
@@ -197,9 +196,8 @@
           # happened to be on the developer's PATH.
           imagemagick
           python3
-          # The launcher smoke registers a small Gio.Application on the
-          # dbus-run-session bus, proving a DBusActivatable desktop entry
-          # through GIO without ever consulting the developer's session bus.
+          # A private Gio.Application fixture catches unintended D-Bus Activate
+          # calls; DBusActivatable tiles must launch their Exec instead.
           python3Packages.pygobject3
           # `pulseaudio` and `pactl`, for the OSD smoke run. It starts a
           # sound server of its *own* inside the sandbox, with a null sink and

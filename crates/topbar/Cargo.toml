@@ -36,4 +36,3 @@ tracing = { workspace = true }
 libc = { workspace = true }
 tokio = { workspace = true }
 niri-ipc = { workspace = true }
-zbus = { workspace = true }
