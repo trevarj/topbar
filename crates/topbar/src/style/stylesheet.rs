@@ -177,7 +177,6 @@ fn root_block(config: &Config) -> String {
     --shadow-popover: 0 1px 4px var(--color-popover-shadow);
     --shadow-modal: 0 4px 14px var(--color-popover-shadow);
     --color-card: {card};
-    --color-launcher-backdrop: {launcher_backdrop};
 
     /* Panel-button states */
     --color-widget-hover: {hover};
@@ -232,7 +231,6 @@ fn root_block(config: &Config) -> String {
         ),
         popover_shadow = Rgb::new(0, 0, 0).to_rgba(0.28),
         card = palette.foreground.to_rgba(0.06),
-        launcher_backdrop = palette.background.to_hex(),
         hover = palette.foreground.to_rgba(0.1),
         pressed = palette.foreground.to_rgba(0.15),
         checked = palette.foreground.to_rgba(0.18),
@@ -1146,14 +1144,10 @@ button.dialog-button-primary:hover {
     box-shadow: none;
 }
 
-/* The opaque palette color is the safe default until compositor blur is usable.
-   A 20% painted tint keeps the blurred backdrop mapped for click-away dismissal. */
-.launcher-backdrop {
-    background-color: var(--color-launcher-backdrop);
-}
-
+/* Match the control center's surface color and opacity, with or without blur. */
+.launcher-backdrop,
 .launcher-backdrop-blurred {
-    background-color: rgba(128, 128, 128, 0.2);
+    background-color: var(--color-popover);
 }
 
 .launcher {

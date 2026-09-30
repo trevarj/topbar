@@ -182,6 +182,9 @@ built: [docs/architecture.md](docs/architecture.md).
 | `background_opacity` | `0.0` | Widget background opacity; `0.0` = transparent until hovered. |
 | `popover_background_opacity` | unset | Popover opacity. Unset follows the bar's. |
 
+The launcher uses the same background colour and opacity as the control center,
+whether compositor blur is enabled or not.
+
 Available widgets: `workspaces`, `clock`, `weather`, `crypto`, `tray`,
 `quick_settings`, `system_monitor`, `headset`, `keyboard_layout`, `os_logo`,
 and any number of `custom-<name>` script widgets. Every `[widgets.<name>]`
