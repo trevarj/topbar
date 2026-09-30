@@ -28,11 +28,12 @@
 //!
 //! # The guard
 //!
-//! Consumers never touch the protocol. They call [`attach`], keep the returned
-//! [`BlurAttachment`] alive for as long as the surface exists, and that is all:
-//! the guard connects `map`/`unmap`/`destroy` and the surface's resize
-//! notifications itself, and its `Drop` removes the region and destroys the
-//! protocol object. Two calls need making by hand, because only the caller
+//! Consumers never touch the protocol. They call [`attach`] for one background
+//! or [`attach_regions`] for a union, and keep the returned [`BlurAttachment`]
+//! alive for as long as the surface exists. The guard connects
+//! `map`/`unmap`/`destroy` and resize notifications itself; unions also follow
+//! painted frames. Its `Drop` removes the region and destroys the protocol
+//! object. Two calls need making by hand, because only the caller
 //! knows when they happen:
 //!
 //! - [`BlurAttachment::suspend`] at the **start of a fade-out**. Compositor-side
@@ -46,7 +47,7 @@
 //! # Surfaces
 //!
 //! The bar, the shared popover host (and so every popover, Quick Settings, tray
-//! menu and dialog on it), the banner stack and the OSD capsule. Tooltips are
+//! menu and dialog on it), the banner backgrounds and the OSD capsule. Tooltips are
 //! deliberately left out: they are small, opaque and short-lived, and v1 came to
 //! the same conclusion.
 
@@ -108,20 +109,26 @@ const READY_FRAMES: u32 = 120;
 ///
 /// A non-positive width or height yields no rectangles at all — the protocol
 /// rejects those — and a zero radius yields the plain rectangle.
-fn rounded_rect(x: i32, y: i32, width: i32, height: i32, radius: i32) -> Vec<(i32, i32, i32, i32)> {
+fn rounded_rect(
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    radius: i32,
+    mut add: impl FnMut((i32, i32, i32, i32)),
+) {
     if width <= 0 || height <= 0 {
-        return Vec::new();
+        return;
     }
     // An oversized radius becomes a pill rather than falling back to a square.
     let radius = radius.min(width / 2).min(height / 2);
     if radius <= 0 {
-        return vec![(x, y, width, height)];
+        add((x, y, width, height));
+        return;
     }
 
-    let has_center = height > 2 * radius;
-    let mut rects = Vec::with_capacity(usize::from(has_center) + 2 * radius as usize);
-    if has_center {
-        rects.push((x, y + radius, width, height - 2 * radius));
+    if height > 2 * radius {
+        add((x, y + radius, width, height - 2 * radius));
     }
 
     let r = f64::from(radius);
@@ -134,25 +141,99 @@ fn rounded_rect(x: i32, y: i32, width: i32, height: i32, radius: i32) -> Vec<(i3
         };
         let inset = (inset + CORNER_INSET).min((width - 1) / 2);
         let row_width = (width - 2 * inset).max(1);
-        rects.push((x + inset, y + row, row_width, 1));
-        rects.push((x + inset, y + height - 1 - row, row_width, 1));
+        add((x + inset, y + row, row_width, 1));
+        add((x + inset, y + height - 1 - row, row_width, 1));
     }
-
-    rects
 }
 
-/// A region already sent to the compositor.
-///
-/// Grow-in animations ease into the same integer rectangle for several frames
-/// near the end of the run; remembering the last one sent turns those frames
-/// into nothing at all.
+/// One rounded background, optionally clipped by its animation slot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct RegionKey {
+pub(crate) struct BlurRegion {
     x: i32,
     y: i32,
     width: i32,
     height: i32,
     radius: i32,
+    clip: Option<(i32, i32, i32, i32)>,
+}
+
+impl BlurRegion {
+    pub(crate) fn clipped(
+        bounds: &gtk4::graphene::Rect,
+        clip: &gtk4::graphene::Rect,
+        radius: i32,
+    ) -> Self {
+        let x = bounds.x().round() as i32;
+        let y = bounds.y().round() as i32;
+        Self {
+            x,
+            y,
+            width: (bounds.x() + bounds.width()).round() as i32 - x,
+            height: (bounds.y() + bounds.height()).round() as i32 - y,
+            radius: radius.max(0),
+            clip: Some((
+                clip.x().ceil() as i32,
+                clip.y().ceil() as i32,
+                (clip.x() + clip.width()).floor() as i32,
+                (clip.y() + clip.height()).floor() as i32,
+            )),
+        }
+    }
+}
+
+/// Geometry already sent to the compositor; a single surface needs no vector.
+#[derive(Debug, Eq, PartialEq)]
+enum RegionGeometry {
+    Single(BlurRegion),
+    Multiple {
+        regions: Vec<BlurRegion>,
+        width: i32,
+        height: i32,
+    },
+}
+
+impl RegionGeometry {
+    fn regions(&self) -> &[BlurRegion] {
+        match self {
+            Self::Single(region) => std::slice::from_ref(region),
+            Self::Multiple { regions, .. } => regions,
+        }
+    }
+}
+
+/// Rasterise before clipping, so a moving card keeps its original corners.
+fn region_rects(regions: &[BlurRegion], width: i32, height: i32) -> Vec<(i32, i32, i32, i32)> {
+    let capacity = regions
+        .iter()
+        .map(|region| {
+            1 + 2 * region
+                .radius
+                .min(region.width / 2)
+                .min(region.height / 2)
+                .max(0) as usize
+        })
+        .sum();
+    let mut rects = Vec::with_capacity(capacity);
+    for region in regions {
+        let (left, top, right, bottom) = region.clip.unwrap_or((0, 0, width, height));
+        let (left, top) = (left.max(0), top.max(0));
+        let (right, bottom) = (right.min(width), bottom.min(height));
+        rounded_rect(
+            region.x,
+            region.y,
+            region.width,
+            region.height,
+            region.radius,
+            |(x, y, w, h)| {
+                let (x1, y1) = (x.max(left), y.max(top));
+                let (x2, y2) = ((x + w).min(right), (y + h).min(bottom));
+                if x2 > x1 && y2 > y1 {
+                    rects.push((x1, y1, x2 - x1, y2 - y1));
+                }
+            },
+        );
+    }
+    rects
 }
 
 // ---------------------------------------------------------------------------
@@ -527,7 +608,7 @@ impl SurfaceInfo {
 struct Effect {
     surface: ObjectId,
     object: ExtBackgroundEffectSurfaceV1,
-    last: Option<RegionKey>,
+    last: Option<RegionGeometry>,
 }
 
 impl Drop for Effect {
@@ -541,12 +622,21 @@ impl Drop for Effect {
     }
 }
 
+type RegionFn = dyn Fn(&gtk4::Widget) -> Vec<BlurRegion>;
+
+enum RegionSource {
+    Content {
+        widget: glib::WeakRef<gtk4::Widget>,
+        radius: Box<dyn Fn() -> i32>,
+    },
+    Regions(Box<RegionFn>),
+}
+
 /// The state behind a live attachment.
 struct Attached {
     manager: Rc<BlurManager>,
     window: glib::WeakRef<gtk4::Widget>,
-    content: glib::WeakRef<gtk4::Widget>,
-    radius: Box<dyn Fn() -> i32>,
+    source: RegionSource,
     effect: RefCell<Option<Effect>>,
     /// How much of the surface is actually being drawn, `0.0..=1.0`.
     scale: Cell<f64>,
@@ -559,6 +649,7 @@ struct Attached {
     /// Signal handlers to disconnect when the guard is dropped.
     window_handlers: RefCell<Vec<glib::SignalHandlerId>>,
     surface_handlers: RefCell<Vec<(gdk::Surface, glib::SignalHandlerId)>>,
+    frame_handler: RefCell<Option<(gdk::FrameClock, glib::SignalHandlerId)>>,
 }
 
 impl Attached {
@@ -567,7 +658,7 @@ impl Attached {
         if self.suspended.get() || !self.manager.capable() {
             return;
         }
-        let (Some(window), Some(content)) = (self.window.upgrade(), self.content.upgrade()) else {
+        let Some(window) = self.window.upgrade() else {
             return;
         };
         if !window.is_mapped() {
@@ -588,7 +679,7 @@ impl Attached {
             self.wait_a_frame(&window);
             return;
         }
-        let Some(key) = self.geometry(&window, &content, &info) else {
+        let Some(key) = self.geometry(&window, &info) else {
             self.wait_a_frame(&window);
             return;
         };
@@ -615,11 +706,11 @@ impl Attached {
         let Some(effect) = slot.as_mut() else {
             return;
         };
-        if effect.last == Some(key) {
+        if effect.last.as_ref() == Some(&key) {
             return;
         }
 
-        let rects = rounded_rect(key.x, key.y, key.width, key.height, key.radius);
+        let rects = region_rects(key.regions(), info.width, info.height);
         let Some(region) = self.manager.region(&rects) else {
             return;
         };
@@ -636,13 +727,19 @@ impl Attached {
         self.manager.flush();
     }
 
-    /// Where the blurred rectangle goes, in surface-local pixels.
-    fn geometry(
-        &self,
-        window: &gtk4::Widget,
-        content: &gtk4::Widget,
-        info: &SurfaceInfo,
-    ) -> Option<RegionKey> {
+    /// Rounded backgrounds in surface-local pixels.
+    fn geometry(&self, window: &gtk4::Widget, info: &SurfaceInfo) -> Option<RegionGeometry> {
+        let (widget, radius) = match &self.source {
+            RegionSource::Regions(regions) => {
+                return Some(RegionGeometry::Multiple {
+                    regions: regions(window),
+                    width: info.width,
+                    height: info.height,
+                });
+            }
+            RegionSource::Content { widget, radius } => (widget, radius),
+        };
+        let content = widget.upgrade()?;
         let bounds = content.compute_bounds(window)?;
         if bounds.width() <= 0.0 || bounds.height() <= 0.0 {
             return None;
@@ -664,17 +761,19 @@ impl Attached {
         let right = ((x + width).round() as i32).clamp(left, info.width);
         let bottom = ((y + height).round() as i32).clamp(top, info.height);
 
-        Some(RegionKey {
+        Some(RegionGeometry::Single(BlurRegion {
             x: left,
             y: top,
             width: right - left,
             height: bottom - top,
-            radius: (self.radius)().max(0),
-        })
+            radius: radius().max(0),
+            clip: None,
+        }))
     }
 
     /// Drop the region, leaving the surface as if blur had never been asked for.
     fn clear(&self) {
+        self.unwatch_surface();
         let Some(effect) = self.effect.borrow_mut().take() else {
             return;
         };
@@ -729,6 +828,19 @@ impl Attached {
             return;
         };
         let mut handlers = self.surface_handlers.borrow_mut();
+        // Dynamic regions follow GTK's completed layout and snapshot-time
+        // animations without requesting any extra frames on an idle window.
+        if matches!(self.source, RegionSource::Regions(_))
+            && let Some(clock) = window.frame_clock()
+        {
+            let attached = Rc::downgrade(self);
+            let id = clock.connect_after_paint(move |_| {
+                if let Some(attached) = attached.upgrade() {
+                    attached.apply();
+                }
+            });
+            *self.frame_handler.borrow_mut() = Some((clock, id));
+        }
         for property in ["width", "height"] {
             let attached = Rc::downgrade(self);
             let id = surface.connect_notify_local(Some(property), move |_, _| {
@@ -742,6 +854,15 @@ impl Attached {
                 });
             });
             handlers.push((surface.clone(), id));
+        }
+    }
+
+    fn unwatch_surface(&self) {
+        for (surface, id) in self.surface_handlers.borrow_mut().drain(..) {
+            surface.disconnect(id);
+        }
+        if let Some((clock, id)) = self.frame_handler.borrow_mut().take() {
+            clock.disconnect(id);
         }
     }
 }
@@ -821,9 +942,6 @@ impl Drop for BlurAttachment {
                 window.disconnect(id);
             }
         }
-        for (surface, id) in inner.surface_handlers.borrow_mut().drain(..) {
-            surface.disconnect(id);
-        }
         inner.clear();
     }
 }
@@ -840,21 +958,39 @@ pub fn attach(
     content: &impl IsA<gtk4::Widget>,
     radius: impl Fn() -> i32 + 'static,
 ) -> BlurAttachment {
+    let content_weak = glib::WeakRef::new();
+    content_weak.set(Some(content.as_ref()));
+    attach_source(
+        window.as_ref(),
+        RegionSource::Content {
+            widget: content_weak,
+            radius: Box::new(radius),
+        },
+    )
+}
+
+/// Blur a union of live backgrounds on one surface, never their bounding box.
+///
+/// The source is read after each painted frame, including layout and animation
+/// changes. Capture widget owners weakly; the guard owns only the effect.
+pub(crate) fn attach_regions(
+    window: &impl IsA<gtk4::Widget>,
+    regions: impl Fn(&gtk4::Widget) -> Vec<BlurRegion> + 'static,
+) -> BlurAttachment {
+    attach_source(window.as_ref(), RegionSource::Regions(Box::new(regions)))
+}
+
+fn attach_source(window: &gtk4::Widget, source: RegionSource) -> BlurAttachment {
     let Some(manager) = MANAGER.with(|cell| cell.borrow().clone()) else {
         return BlurAttachment::inert();
     };
-
-    let window = window.as_ref();
     let window_weak = glib::WeakRef::new();
     window_weak.set(Some(window));
-    let content_weak = glib::WeakRef::new();
-    content_weak.set(Some(content.as_ref()));
 
     let attached = Rc::new(Attached {
         manager,
         window: window_weak,
-        content: content_weak,
-        radius: Box::new(radius),
+        source,
         effect: RefCell::new(None),
         scale: Cell::new(1.0),
         suspended: Cell::new(false),
@@ -862,6 +998,7 @@ pub fn attach(
         waiting: Cell::new(false),
         window_handlers: RefCell::new(Vec::new()),
         surface_handlers: RefCell::new(Vec::new()),
+        frame_handler: RefCell::new(None),
     });
 
     let handlers = vec![
@@ -910,6 +1047,18 @@ fn handler(
 mod tests {
     use super::*;
 
+    fn rounded_rect(
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        radius: i32,
+    ) -> Vec<(i32, i32, i32, i32)> {
+        let mut rects = Vec::new();
+        super::rounded_rect(x, y, width, height, radius, |rect| rects.push(rect));
+        rects
+    }
+
     /// Total area of a set of rectangles.
     fn area(rects: &[(i32, i32, i32, i32)]) -> i64 {
         rects
@@ -929,6 +1078,82 @@ mod tests {
             }
         }
         grid.iter().filter(|&&set| set).count()
+    }
+
+    fn contains(rects: &[(i32, i32, i32, i32)], px: i32, py: i32) -> bool {
+        rects
+            .iter()
+            .any(|&(x, y, w, h)| px >= x && px < x + w && py >= y && py < y + h)
+    }
+
+    #[test]
+    fn separated_backgrounds_keep_their_gap_and_corners_clear() {
+        let region = |y, height| BlurRegion {
+            x: 8,
+            y,
+            width: 40,
+            height,
+            radius: 8,
+            clip: None,
+        };
+        let mut backgrounds = vec![region(8, 24), region(40, 40)];
+        let rects = region_rects(&backgrounds, 56, 88);
+        for (x, y) in [(28, 20), (28, 60)] {
+            assert!(contains(&rects, x, y), "background interior ({x}, {y})");
+        }
+        for y in 32..40 {
+            for x in 0..56 {
+                assert!(!contains(&rects, x, y), "gap pixel ({x}, {y})");
+            }
+        }
+        for (x, y) in [(8, 8), (47, 31), (8, 40), (47, 79)] {
+            assert!(!contains(&rects, x, y), "rounded cutout ({x}, {y})");
+        }
+
+        // Replacement/reflow moves the second background without changing
+        // the overall surface size; the new gap must replace the old union.
+        backgrounds[0].height = 40;
+        backgrounds[1].y = 56;
+        backgrounds[1].height = 24;
+        let rects = region_rects(&backgrounds, 56, 88);
+        assert!(contains(&rects, 28, 44));
+        assert!(!contains(&rects, 28, 52));
+        assert!(contains(&rects, 28, 68));
+        backgrounds.remove(1);
+        let rects = region_rects(&backgrounds, 56, 88);
+        assert!(contains(&rects, 28, 44));
+        assert!(!contains(&rects, 28, 68), "dismissed background");
+        assert!(region_rects(&[], 56, 88).is_empty());
+    }
+
+    #[test]
+    fn a_sliding_background_is_rounded_before_its_slot_clips_it() {
+        let bounds = gtk4::graphene::Rect::new(8.0, -8.0, 40.0, 32.0);
+        let clip = gtk4::graphene::Rect::new(8.0, 8.0, 40.0, 32.0);
+        let region = BlurRegion::clipped(&bounds, &clip, 8);
+        let rects = region_rects(&[region], 56, 48);
+        assert!(
+            contains(&rects, 8, 8),
+            "the clipped top is not a new corner"
+        );
+        assert!(contains(&rects, 28, 23), "the translated bottom is blurred");
+        assert!(
+            !contains(&rects, 8, 23),
+            "the original bottom corner stays cut out"
+        );
+        for y in 0..48 {
+            for x in 0..56 {
+                if !(8..48).contains(&x) || !(8..24).contains(&y) {
+                    assert!(!contains(&rects, x, y), "outside the visible background");
+                }
+            }
+        }
+        let rects = region_rects(&[region], 24, 16);
+        assert!(
+            rects
+                .iter()
+                .all(|&(x, y, w, h)| x >= 0 && y >= 0 && x + w <= 24 && y + h <= 16)
+        );
     }
 
     #[test]

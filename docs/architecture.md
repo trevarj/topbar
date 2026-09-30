@@ -255,8 +255,18 @@ surfaces: an attachment is made once, against the blur manager as it was at the
 time, and there is no supported way to edit one afterwards.
 
 Blur covers the bar, the popover host (and so every popover, menu and dialog on
-it), the banner stack and the OSD capsule. Tooltips are left out: small, opaque
-and short-lived.
+it), notification backgrounds and the OSD capsule. The notification window
+keeps one effect object, but its region is the union of the individual rounded
+card backgrounds: transparent gaps, corner cutouts and shadow margins are not
+blurred. That attachment samples live card geometry after GTK paints, so
+replacement, reorder, removal, height and scale changes do not leave an old
+stack-wide region behind. SlideBox translates only at snapshot time; its blur
+background is translated by the same reveal and then clipped to the card's
+slot, preserving the original rounded corners. A departing card is omitted
+when its fade starts, because compositor blur ignores widget opacity. The
+geometry source holds the card list weakly, and unmap/drop disconnects the
+frame-clock and surface watchers. Other surfaces keep their single rounded
+region. Tooltips are left out: small, opaque and short-lived.
 
 ## Hot reload
 

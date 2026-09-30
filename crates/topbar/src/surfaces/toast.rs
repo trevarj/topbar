@@ -41,7 +41,7 @@ use crate::fonts::{self, FontRendering};
 use crate::style::{self, classes};
 use crate::surfaces::layer_popover;
 use crate::wayland::activation;
-use crate::wayland::blur::{self, BlurAttachment};
+use crate::wayland::blur::{self, BlurAttachment, BlurRegion};
 use crate::widgets::notifications::{self as notifications, TOAST_ICON, icon, markup};
 
 /// Width of a banner, in pixels.
@@ -101,7 +101,7 @@ pub struct ToastSurface {
     top_margin: i32,
     /// Subscriptions that keep this surface in step with the services.
     bindings: RefCell<Vec<BindingGuard>>,
-    /// The blur behind the stack of banners.
+    /// One blur effect containing only the live banners' backgrounds.
     blur: BlurAttachment,
 }
 
@@ -127,15 +127,26 @@ impl ToastSurface {
         stack.set_margin_bottom(SHADOW_MARGIN);
         window.set_child(Some(&stack));
 
+        let cards: Rc<RefCell<Vec<Card>>> = Rc::new(RefCell::new(Vec::new()));
+        let blur_cards = Rc::downgrade(&cards);
+
         let surface = Rc::new(Self {
-            // One region for the whole stack rather than one per banner: the
-            // banners are a single group, the gaps between them are eight
-            // pixels wide, and a region per card would have to be rebuilt on
-            // every arrival and departure.
-            blur: blur::attach(&window, &stack, || style::POPOVER_RADIUS as i32),
+            blur: blur::attach_regions(&window, move |window| {
+                let Some(cards) = blur_cards.upgrade() else {
+                    return Vec::new();
+                };
+                let cards = cards.borrow();
+                cards
+                    .iter()
+                    // Blur ignores opacity: remove each background as its
+                    // fade starts, not just when the last banner leaves.
+                    .filter(|card| !card.leaving.get() && card.card.is_mapped())
+                    .filter_map(|card| banner_blur_region(&card.slide, &card.card, window))
+                    .collect()
+            }),
             window,
             stack,
-            cards: Rc::new(RefCell::new(Vec::new())),
+            cards,
             services: services.clone(),
             font_rendering: FontRendering::from_config(config),
             connector: connector.to_string(),
@@ -288,7 +299,7 @@ impl ToastSurface {
                 cards.borrow_mut().retain(|other| !other.same(&leaving));
                 // The previous render sized the window while this departing
                 // banner still occupied a slot. Resize after removing it so
-                // the remaining stack (and the blur's resize watcher) shrinks.
+                // the remaining stack shrinks; blur follows the next paint.
                 if let Some(window) = stack.root().and_downcast::<Window>() {
                     if cards.borrow().is_empty() {
                         window.set_visible(false);
@@ -313,14 +324,14 @@ impl ToastSurface {
         cards.insert(position, card.clone());
         drop(cards);
 
+        card.slide.set_reveal(0.0);
+        card.card.set_opacity(0.0);
         // Present before animating: a banner sliding in on an unmapped surface
         // finishes its run before the compositor ever shows it.
         self.show();
         // A banner arriving while the last one is still sliding away catches a
         // surface that never unmapped, so the blur is asked back by hand.
         self.blur.resume();
-        card.slide.set_reveal(0.0);
-        card.card.set_opacity(0.0);
         card.slide(1.0, || {});
     }
 
@@ -630,6 +641,35 @@ impl Card {
     }
 }
 
+/// SlideBox translates only during snapshot; its allocation remains full size.
+fn banner_blur_region(
+    slide: &SlideBox,
+    card: &impl IsA<gtk4::Widget>,
+    window: &gtk4::Widget,
+) -> Option<BlurRegion> {
+    let reveal = slide.reveal();
+    if reveal <= 0.0 || !slide.is_visible() || !card.as_ref().is_visible() {
+        return None;
+    }
+    let bounds = card.compute_bounds(window)?;
+    let clip = slide.compute_bounds(window)?;
+    if bounds.width() <= 0.0 || bounds.height() <= 0.0 {
+        return None;
+    }
+    let offset = -(1.0 - reveal) as f32 * slide.height() as f32;
+    let translated = gtk4::graphene::Rect::new(
+        bounds.x(),
+        bounds.y() + offset,
+        bounds.width(),
+        bounds.height(),
+    );
+    Some(BlurRegion::clipped(
+        &translated,
+        &clip,
+        style::POPOVER_RADIUS as i32,
+    ))
+}
+
 /// Ask the compositor for an activation token, then run the action.
 ///
 /// The token is what lets the receiving application raise its own window; the
@@ -681,6 +721,77 @@ mod tests {
 
     fn outputs(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    #[test]
+    #[ignore = "requires a GTK display; run under Xvfb with --ignored --exact"]
+    fn banner_blur_tracks_allocations_and_slide_clipping() {
+        gtk4::init().expect("GTK display");
+        let stack = gtk4::Box::new(Orientation::Vertical, GAP);
+        let first = gtk4::Box::new(Orientation::Vertical, 0);
+        let second = gtk4::Box::new(Orientation::Vertical, 0);
+        first.set_size_request(WIDTH, 24);
+        second.set_size_request(WIDTH, 40);
+        let first_slide = SlideBox::new();
+        let second_slide = SlideBox::new();
+        first_slide.set_child(&first);
+        second_slide.set_child(&second);
+        stack.append(&first_slide);
+        stack.append(&second_slide);
+        stack.set_valign(Align::Start);
+        let root = gtk4::Box::new(Orientation::Vertical, 0);
+        root.append(&stack);
+        root.allocate(WIDTH, 128, -1, None);
+
+        let expected = |y, height, offset| {
+            let bounds = gtk4::graphene::Rect::new(0.0, y + offset, WIDTH as f32, height);
+            let clip = gtk4::graphene::Rect::new(0.0, y, WIDTH as f32, height);
+            Some(BlurRegion::clipped(
+                &bounds,
+                &clip,
+                style::POPOVER_RADIUS as i32,
+            ))
+        };
+        let window = root.upcast_ref::<gtk4::Widget>();
+        assert_eq!(
+            banner_blur_region(&first_slide, &first, window),
+            expected(0.0, 24.0, 0.0)
+        );
+        assert_eq!(
+            banner_blur_region(&second_slide, &second, window),
+            expected(32.0, 40.0, 0.0)
+        );
+
+        first.set_size_request(WIDTH, 48);
+        root.allocate(WIDTH, 128, -1, None);
+        assert_eq!(
+            banner_blur_region(&second_slide, &second, window),
+            expected(56.0, 40.0, 0.0)
+        );
+        stack.reorder_child_after(&second_slide, None::<&gtk4::Widget>);
+        root.allocate(WIDTH, 128, -1, None);
+        assert_eq!(
+            banner_blur_region(&first_slide, &first, window),
+            expected(48.0, 48.0, 0.0)
+        );
+
+        first_slide.set_reveal(0.5);
+        assert_eq!(
+            banner_blur_region(&first_slide, &first, window),
+            expected(48.0, 48.0, -24.0)
+        );
+        first_slide.set_reveal(0.0);
+        assert!(banner_blur_region(&first_slide, &first, window).is_none());
+        first_slide.set_reveal(1.0);
+        first_slide.set_visible(false);
+        assert!(banner_blur_region(&first_slide, &first, window).is_none());
+        stack.remove(&first_slide);
+        root.allocate(WIDTH, 128, -1, None);
+        assert_eq!(
+            banner_blur_region(&second_slide, &second, window),
+            expected(0.0, 40.0, 0.0)
+        );
+        assert!(banner_blur_region(&first_slide, &first, window).is_none());
     }
 
     #[test]

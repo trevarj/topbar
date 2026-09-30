@@ -40,15 +40,19 @@ shot panel topbar-popover
 "$SMOKE_TOPBAR" popover hide >>"$art/ipc.log" 2>&1 || true
 sleep 2
 
-# --- a banner ---------------------------------------------------------------
+# --- separated banner backgrounds ------------------------------------------
 #
-# Half a minute, not the four seconds a banner normally gets. `grim` hands back
+# Two minutes, not the four seconds a banner normally gets. `grim` hands back
 # the last frame the nested session *presented*, which under the host
 # compositor's throttling can be seconds old — and a banner that has already
 # left by the time that frame lands is a screenshot of nothing at all, which is
 # exactly what the first version of this script produced.
-notify-send -t 30000 "Blur" "The banner surface asks for a region of its own." || true
+notify-send -t 120000 "Blur" "The banner surface asks for a region of its own." || true
 shot toast topbar-toast
+# A summary-only card is shorter, so the gap and both cards' inner-facing
+# rounded cutouts can be inspected over the same textured backdrop.
+notify-send -t 120000 "Blur: a separate background" || true
+shot toast-two topbar-toast
 
 # --- the capsule ------------------------------------------------------------
 #
