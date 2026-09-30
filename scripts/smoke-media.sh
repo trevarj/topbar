@@ -110,9 +110,11 @@ card() {
 card media-0-no-players
 
 # --- (a) one player ---------------------------------------------------------
-# CanGoNext is off, so the next button has to be visibly dimmed.
+# CanGoNext is off, so the next button has to be visibly dimmed. The title must
+# wrap and stop at three lines without widening the panel beside the larger art.
 "$player" --name smokeone --identity "Aurora Player" --desktop-entry org.gnome.Music \
-  --title "Windowlicker" --artist "Aphex Twin" --album "Windowlicker" \
+  --title "Windowlicker — A Very Long Live Recording From The Evening Session With An Extended Introduction And A Slow Ending That Must Wrap Across The Media Card Rather Than Widen The Control Panel Beyond Its Normal Size" \
+  --artist "Aphex Twin" --album "Windowlicker" \
   --art "file://$art/cover-a.png" --status Playing \
   --length 221000000 --position 72000000 --no-next >/dev/null 2>&1 &
 one=$!
@@ -124,6 +126,13 @@ card media-1-one-player
   --status Paused --length 120000000 >/dev/null 2>&1 &
 two=$!
 card media-2-two-players
+
+# WordChar must also break a title with no word boundaries, with both switcher
+# buttons still visible and the cover retaining its square allocation.
+control smokeone SetTrack \
+  "WindowlickerAnUnbrokenTitleThatMustWrapEvenWithoutSpacesAndStopAfterThreeLinesRatherThanWideningTheControlPanelOrPushingThePlayerSwitcherOutsideTheCardWindowlickerAnUnbrokenTitleThatMustWrapEvenWithoutSpaces" \
+  "Aphex Twin" "file://$art/cover-a.png" 221000000
+card media-2-unbroken-title
 
 # The card follows what is playing without anyone clicking anything: the first
 # player stops, the second starts, and the switcher's ring moves with it.

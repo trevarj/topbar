@@ -2,9 +2,9 @@
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────┐
-//! │ ██████      Windowlicker         ( )(●)     │  art 72px; switcher, 2+ only
-//! │ ██████       Aphex Twin                     │  title, artist (ellipsized)
-//! │ ██████                                      │
+//! │ ████████    A longer track title   ( )(●)   │  art 104px; switcher, 2+ only
+//! │ ████████    wraps up to three lines…        │  title, then artist
+//! │ ████████    Artist                          │
 //! │ ──────●─────────────────────────────────    │  seek, only when seekable
 //! │ 1:12                                   3:41 │
 //! │            ⏮       ⏸       ⏭                │  transport
@@ -13,8 +13,7 @@
 //!
 //! The shape is GNOME's date menu: the square and the text are one block, the
 //! transport is a centred row of its own rather than a tail on the artist
-//! line, and the switcher sits beside the title where it does not move
-//! anything when it appears.
+//! line, and the switcher sits beside the metadata without covering it.
 //!
 //! The whole card is hidden when no player is on the bus, which is the usual
 //! state of a desktop: a card explaining that nothing is playing is a card
@@ -46,7 +45,7 @@ use crate::widgets::app_icon;
 use crate::widgets::rounded_picture::RoundedPicture;
 
 /// Side of the album art, in pixels.
-const ART_SIZE: i32 = 72;
+const ART_SIZE: i32 = 104;
 /// Corner radius of the album art, in pixels.
 const ART_RADIUS: f32 = 12.0;
 /// How long the art takes to change.
@@ -165,23 +164,27 @@ impl Card {
         art_slot.add_overlay(&art);
         art_slot.set_halign(Align::Start);
         // Centred against the text beside it. Top-aligned, the square and the
-        // two lines of text read as two things that happen to share a row.
+        // metadata read as two things that happen to share a row.
         art_slot.set_valign(Align::Center);
 
         // --- text ------------------------------------------------------------
-        // Centred, so the two lines read as one block against the square
-        // beside them rather than as a ragged column.
+        // The expanding text gets the row's remaining width, not the title's
+        // natural width: long metadata must not widen the whole control panel.
         let title = Label::new(None);
         title.add_css_class(classes::MEDIA_TITLE);
-        title.set_xalign(0.5);
-        title.set_single_line_mode(true);
+        title.set_xalign(0.0);
+        title.set_wrap(true);
+        title.set_wrap_mode(pango::WrapMode::WordChar);
+        title.set_lines(3);
+        title.set_max_width_chars(1);
         title.set_ellipsize(pango::EllipsizeMode::End);
 
         let artist = Label::new(None);
         artist.add_css_class(classes::MEDIA_ARTIST);
-        artist.set_xalign(0.5);
+        artist.set_xalign(0.0);
         artist.set_single_line_mode(true);
         artist.set_ellipsize(pango::EllipsizeMode::End);
+        artist.set_max_width_chars(1);
 
         let text = gtk4::Box::new(Orientation::Vertical, 2);
         text.set_hexpand(true);
@@ -215,7 +218,7 @@ impl Card {
         // Top-right, on the title's line. It stays in the flow rather than
         // being overlaid, because an overlay would sit on top of a long
         // ellipsized title; in the flow, a second player appearing simply
-        // re-centres the title once.
+        // leaves less room for the wrapping text.
         let switcher = gtk4::Box::new(Orientation::Horizontal, 6);
         switcher.add_css_class(classes::MEDIA_SWITCHER);
         switcher.set_valign(Align::Start);
@@ -950,6 +953,118 @@ pub fn format_duration(microseconds: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires an isolated D-Bus session and GTK display; run under Xvfb with --ignored --exact"]
+    fn metadata_wraps_without_widening_the_control_panel() {
+        use crate::widgets::control_panel::{ControlPanel, RIGHT_WIDTH};
+        use topbar_core::Config;
+
+        gtk4::init().expect("GTK display");
+        let settings = gtk4::Settings::default().expect("GTK settings");
+        let animations = settings.is_gtk_enable_animations();
+        settings.set_gtk_enable_animations(false);
+        let mut config = Config::default();
+        config.widgets.left.clear();
+        config.widgets.center.clear();
+        config.widgets.right.clear();
+        crate::style::apply(&config);
+        let services = Services::start(&config);
+        let panel = ControlPanel::new(&config.widgets.clock, &config.widgets.weather, &services);
+        panel.render(chrono::Local::now());
+        let card = &panel.media;
+        // Only our snapshots drive this layout, never a bus discovery result.
+        card.binding.borrow_mut().take();
+        let mut state = MediaState {
+            players: vec![player(
+                "org.mpris.MediaPlayer2.a",
+                Some("Short"),
+                Some("Artist"),
+            )],
+            active: Some(0),
+        };
+        card.render(&state);
+
+        let surface = gtk4::Box::new(Orientation::Vertical, 0);
+        surface.add_css_class(classes::POPOVER_SURFACE);
+        surface.append(&panel.root);
+        let window = gtk4::Window::new();
+        window.set_child(Some(&surface));
+        window.present();
+        let settle = || {
+            // Let GTK's frame clock measure, allocate and paint the mapped UI.
+            glib::MainContext::default()
+                .block_on(glib::timeout_future(std::time::Duration::from_millis(50)));
+        };
+        settle();
+        assert!(card.root.is_mapped());
+        let panel_width = panel.root.width();
+        let window_width = window.width();
+        let card_width = card.root.width();
+        let natural_width = panel.root.measure(Orientation::Horizontal, -1).1;
+        assert_eq!(card.slot.width(), RIGHT_WIDTH);
+        assert_eq!((card.art.width(), card.art.height()), (104, 104));
+        assert_eq!(card.title.layout().line_count(), 1);
+        assert!(!card.title.layout().is_ellipsized());
+
+        // A cached real texture exercises the artwork overlay without file I/O.
+        let pixbuf =
+            gtk4::gdk_pixbuf::Pixbuf::new(gtk4::gdk_pixbuf::Colorspace::Rgb, true, 8, 2, 2)
+                .expect("cover pixbuf");
+        pixbuf.fill(0x5b80aaff);
+        remember_texture(1, &gdk::Texture::for_pixbuf(&pixbuf));
+        state.players[0].art = Some(ArtRef {
+            key: 1,
+            path: std::path::PathBuf::new(),
+        });
+        let spaced = "A long track title with enough words to fill many lines ".repeat(20);
+        let unbroken = "UnbrokenTitle".repeat(80);
+        let long_artist = "An artist whose name must also stay inside the card ".repeat(20);
+        for players in [1, 2] {
+            if players == 2 {
+                state
+                    .players
+                    .push(player("org.mpris.MediaPlayer2.b", Some("Other"), None));
+            }
+            for title in [&spaced, &unbroken] {
+                state.players[0].title = Some(title.clone());
+                state.players[0].artist = Some(long_artist.clone());
+                card.render(&state);
+                settle();
+                assert_eq!(card.title.layout().line_count(), 3, "{players} players");
+                assert!(card.title.layout().is_ellipsized());
+                assert_eq!(card.artist.layout().line_count(), 1);
+                assert!(card.artist.layout().is_ellipsized());
+                assert_eq!(panel.root.width(), panel_width);
+                assert_eq!(window.width(), window_width);
+                assert_eq!(
+                    panel.root.measure(Orientation::Horizontal, -1).1,
+                    natural_width
+                );
+                assert_eq!(card.slot.width(), RIGHT_WIDTH);
+                assert_eq!(card.root.width(), card_width);
+                assert_eq!((card.art.width(), card.art.height()), (104, 104));
+                assert_eq!(card.switcher.is_visible(), players > 1);
+            }
+        }
+
+        state.players.truncate(1);
+        state.players[0].title = Some("Short".to_string());
+        state.players[0].artist = Some("Artist".to_string());
+        state.players[0].art = None;
+        card.render(&state);
+        settle();
+        assert_eq!(card.title.layout().line_count(), 1);
+        assert!(!card.title.layout().is_ellipsized());
+        assert_eq!(card.slot.width(), RIGHT_WIDTH);
+        assert_eq!((card.art.width(), card.art.height()), (104, 104));
+        assert_eq!(panel.root.width(), panel_width);
+        assert_eq!(window.width(), window_width);
+        window.close();
+        window.set_child(None::<&gtk4::Widget>);
+        TEXTURES.with_borrow_mut(|cache| cache.clear());
+        settings.set_gtk_enable_animations(animations);
+    }
 
     /// A player with nothing filled in but the two fields the labels read.
     fn player(bus_name: &str, title: Option<&str>, artist: Option<&str>) -> PlayerView {

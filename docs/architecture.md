@@ -181,6 +181,10 @@ transparent layer surface below it catches the dismissing click; it asks for an
 exclusive zone of zero, so the compositor's own arithmetic leaves the bar
 uncovered and clicking the button that opened a popover toggles it shut.
 
+The control panel's media card keeps artwork at 104px square. Metadata uses the
+remaining column width: titles wrap to at most three lines with an end ellipsis,
+and artists stay on one ellipsized line, so long tracks do not widen the popover.
+
 **Toasts** (`surfaces/toast.rs`): one surface per monitor, and only the one on
 the focused output shows anything. It unmaps when empty, so a transparent
 window never eats desktop clicks. The expiry timer lives in the notification
