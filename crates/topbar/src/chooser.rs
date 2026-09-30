@@ -50,9 +50,9 @@ const LIST_ROW_HEIGHT: i32 = 44;
 /// Title, optional message, search, actions, padding, and box spacing.
 /// This intentionally leaves some headroom for fractional-scale text.
 const CHOOSER_CHROME_HEIGHT: i32 = 210;
-/// The shared wallpaper title, tabs, presets, status, search, actions, error
-/// line, padding, and spacing (including controls hidden in the Local tab).
-const WALLPAPER_CHROME_HEIGHT: i32 = 330;
+/// The shared wallpaper title, tabs, presets, status, API query, result filter,
+/// actions, error line, padding, and spacing (including hidden Local controls).
+const WALLPAPER_CHROME_HEIGHT: i32 = 380;
 const PREVIEW_MIN_HEIGHT: i32 = 160;
 const PREVIEW_MAX_HEIGHT: i32 = 240;
 /// A chooser only needs enough decoded images for its visible rows and
@@ -431,6 +431,8 @@ struct Candidate {
     preview: Option<PathBuf>,
     #[serde(default)]
     palette: Option<Palette>,
+    #[serde(default)]
+    tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -447,8 +449,15 @@ struct WallpaperInput {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum WallpaperPending {
-    Search { preset: String, generation: u64 },
-    Save { preset: String, generation: u64 },
+    Search {
+        preset: String,
+        query: String,
+        generation: u64,
+    },
+    Save {
+        preset: String,
+        generation: u64,
+    },
 }
 
 #[derive(Deserialize)]
@@ -475,11 +484,20 @@ fn provider_command(executable: &Path, args: &[&str]) -> Result<Vec<u8>, String>
     Ok(output.stdout)
 }
 
+#[derive(Default)]
+struct WallpaperSearch {
+    query: String,
+    rows: Vec<Candidate>,
+    error: Option<String>,
+    finished: bool,
+}
+
 struct WallpaperState {
     executable: PathBuf,
     presets: Vec<WallpaperPreset>,
     pool: Vec<Candidate>,
-    cached: HashMap<String, Vec<Candidate>>,
+    // ponytail: retain only the latest query and results for each fixed preset.
+    cached: HashMap<String, WallpaperSearch>,
     active: Option<String>,
     last_preset: Option<usize>,
     pending: Option<WallpaperPending>,
@@ -494,7 +512,7 @@ impl WallpaperState {
             return false;
         }
         if let Some(old) = self.active.take() {
-            self.cached.insert(old, std::mem::take(rows));
+            self.cached.entry(old).or_default().rows = std::mem::take(rows);
         } else {
             self.pool = std::mem::take(rows);
         }
@@ -503,7 +521,7 @@ impl WallpaperState {
         }
         self.active = preset.map(str::to_owned);
         *rows = if let Some(preset) = preset {
-            self.cached.remove(preset).unwrap_or_default()
+            std::mem::take(&mut self.cached.entry(preset.to_owned()).or_default().rows)
         } else {
             std::mem::take(&mut self.pool)
         };
@@ -525,12 +543,22 @@ impl WallpaperState {
     }
 
     fn display_or_cache(&mut self, preset: &str, rows: Vec<Candidate>) -> Option<Vec<Candidate>> {
+        let search = self.cached.entry(preset.to_owned()).or_default();
+        search.finished = true;
+        search.error = None;
         if self.active.as_deref() == Some(preset) {
             Some(rows)
         } else {
-            self.cached.insert(preset.to_string(), rows);
+            search.rows = rows;
             None
         }
+    }
+
+    fn search_failed(&mut self, preset: &str, error: String) -> Option<String> {
+        let search = self.cached.get_mut(preset).expect("submitted search");
+        search.finished = true;
+        search.error = Some(error.clone());
+        (self.active.as_deref() == Some(preset)).then_some(error)
     }
 
     fn preferred_preset(&self) -> Option<&str> {
@@ -542,15 +570,41 @@ impl WallpaperState {
         })
     }
 
-    fn searching(&mut self) -> Option<(String, u64)> {
+    fn current_search(&self) -> Option<&WallpaperSearch> {
+        self.active
+            .as_ref()
+            .and_then(|preset| self.cached.get(preset))
+    }
+
+    fn needs_search(&self) -> bool {
+        self.pending.is_none() && self.current_search().is_some_and(|search| !search.finished)
+    }
+
+    fn retry_query(&self) -> Option<&str> {
+        self.current_search()
+            .filter(|search| search.error.is_some())
+            .map(|search| search.query.as_str())
+    }
+
+    fn searching(&mut self, query: String) -> Option<(String, u64)> {
         let preset = self.active.as_ref()?;
-        if self.pending.is_some() {
+        if matches!(self.pending, Some(WallpaperPending::Save { .. }))
+            || matches!(&self.pending, Some(WallpaperPending::Search {
+                preset: pending_preset, query: pending_query, ..
+            }) if pending_preset == preset && pending_query == &query)
+        {
             return None;
         }
+        let search = self.cached.entry(preset.clone()).or_default();
+        search.query = query.clone();
+        search.rows.clear();
+        search.error = None;
+        search.finished = false;
         self.generation += 1;
         let generation = self.generation;
         self.pending = Some(WallpaperPending::Search {
             preset: preset.clone(),
+            query,
             generation,
         });
         Some((preset.clone(), generation))
@@ -876,6 +930,7 @@ fn matching_indices(candidates: &[Candidate], query: &str) -> Vec<usize> {
             ]
             .into_iter()
             .flatten()
+            .chain(candidate.tags.iter().map(String::as_str))
             .any(|field| rank_match(query, field).is_some())
             .then_some(index)
         })
@@ -976,6 +1031,10 @@ struct Chooser {
     current: Option<String>,
     selected: RefCell<Option<String>>,
     search: Entry,
+    wallhaven_query_row: gtk4::Box,
+    wallhaven_query: Entry,
+    wallhaven_search: Button,
+    filter: Entry,
     scroll: gtk4::ScrolledWindow,
     scroll_motion: Animation,
     scroll_target: Rc<Cell<Option<f64>>>,
@@ -1052,7 +1111,7 @@ impl Chooser {
         let geometry = chooser_geometry(
             layout,
             thumbnail_height,
-            available_height.saturating_sub(if wallpaper.is_some() { 110 } else { 0 }),
+            available_height.saturating_sub(if wallpaper.is_some() { 160 } else { 0 }),
         );
         // Allow for the Wallhaven controls even when Local hides them. Keep
         // the outer size fixed, but do not stretch a short chooser to fill the
@@ -1060,7 +1119,7 @@ impl Chooser {
         let scroll_height = if wallpaper.is_some() {
             geometry.scroll_height.min(
                 available_height
-                    .saturating_sub(398 + geometry.preview_height.unwrap_or(0))
+                    .saturating_sub(448 + geometry.preview_height.unwrap_or(0))
                     .max(200),
             )
         } else {
@@ -1151,6 +1210,27 @@ impl Chooser {
         search.set_placeholder_text(Some("Search"));
         search.set_primary_icon_name(Some("system-search-symbolic"));
         root.append(&search);
+
+        let wallhaven_query_row = gtk4::Box::new(Orientation::Horizontal, 8);
+        wallhaven_query_row.set_visible(false);
+        let wallhaven_query = Entry::new();
+        wallhaven_query.add_css_class(classes::CHOOSER_SEARCH);
+        wallhaven_query.set_placeholder_text(Some("Search Wallhaven (empty uses preset)"));
+        wallhaven_query.update_property(&[gtk4::accessible::Property::Label("Search Wallhaven")]);
+        wallhaven_query.set_primary_icon_name(Some("system-search-symbolic"));
+        wallhaven_query.set_hexpand(true);
+        let wallhaven_search = Button::with_label("Search");
+        wallhaven_search.add_css_class(classes::DIALOG_BUTTON);
+        install_interaction_feedback(&wallhaven_search);
+        wallhaven_query_row.append(&wallhaven_query);
+        wallhaven_query_row.append(&wallhaven_search);
+        root.append(&wallhaven_query_row);
+        let filter = Entry::new();
+        filter.add_css_class(classes::CHOOSER_SEARCH);
+        filter.set_placeholder_text(Some("Filter results"));
+        filter.update_property(&[gtk4::accessible::Property::Label("Filter results")]);
+        filter.set_visible(false);
+        root.append(&filter);
 
         let results = gtk4::Box::new(Orientation::Vertical, 4);
         results.add_css_class(classes::CHOOSER_RESULTS);
@@ -1260,6 +1340,10 @@ impl Chooser {
             current,
             selected: RefCell::new(initial),
             search,
+            wallhaven_query_row,
+            wallhaven_query,
+            wallhaven_search,
+            filter,
             scroll,
             scroll_motion,
             scroll_target: Rc::new(Cell::new(None)),
@@ -1337,11 +1421,33 @@ impl Chooser {
             let weak = Rc::downgrade(self);
             move |_| {
                 if let Some(chooser) = weak.upgrade() {
-                    if chooser.candidates.borrow().is_empty() {
-                        chooser.start_wallpaper_search();
+                    let query = chooser
+                        .wallpaper
+                        .borrow()
+                        .as_ref()
+                        .and_then(WallpaperState::retry_query)
+                        .map(str::to_owned);
+                    if let Some(query) = query {
+                        chooser.start_wallpaper_search(query);
                     } else {
                         chooser.accept();
                     }
+                }
+            }
+        });
+        self.wallhaven_query.connect_activate({
+            let weak = Rc::downgrade(self);
+            move |_| {
+                if let Some(chooser) = weak.upgrade() {
+                    chooser.submit_wallhaven_query();
+                }
+            }
+        });
+        self.wallhaven_search.connect_clicked({
+            let weak = Rc::downgrade(self);
+            move |_| {
+                if let Some(chooser) = weak.upgrade() {
+                    chooser.submit_wallhaven_query();
                 }
             }
         });
@@ -1359,6 +1465,14 @@ impl Chooser {
         self.wallhaven_tab.set_sensitive(!saving);
         self.cancel_button.set_sensitive(!saving);
         self.search.set_sensitive(!saving);
+        self.search.set_visible(active.is_none());
+        self.wallhaven_query_row.set_visible(active.is_some());
+        self.filter.set_visible(active.is_some());
+        self.wallhaven_query.set_sensitive(!saving);
+        self.wallhaven_search.set_sensitive(!saving);
+        self.filter.set_sensitive(!saving);
+        self.retry
+            .set_sensitive(!saving && (state.retry_query().is_some() || self.selection_is_ready()));
         self.update_random_sensitivity();
         self.pool_tab
             .remove_css_class(classes::DIALOG_BUTTON_PRIMARY);
@@ -1418,32 +1532,68 @@ impl Chooser {
         self.status.set_label("");
         self.status.set_tooltip_text(None);
         self.retry.set_visible(false);
+        let (query, error, needs_search) = {
+            let state = self.wallpaper.borrow();
+            let state = state.as_ref().expect("wallpaper state");
+            let search = state.current_search();
+            (
+                search
+                    .map(|search| search.query.clone())
+                    .unwrap_or_default(),
+                search.and_then(|search| search.error.clone()),
+                state.needs_search(),
+            )
+        };
+        self.wallhaven_query.set_text(&query);
+        if let Some(error) = error {
+            self.wallpaper_error(error);
+        }
         *self.selected.borrow_mut() = None;
         self.ensure_visible_selection();
         self.update_wallpaper_controls();
+        if preset.is_some() {
+            self.wallhaven_query.grab_focus();
+        } else {
+            self.search.grab_focus();
+        }
         self.render();
-        if preset.is_some() && self.candidates.borrow().is_empty() {
-            self.start_wallpaper_search();
+        if needs_search {
+            self.start_wallpaper_search(query);
         }
     }
 
-    fn start_wallpaper_search(self: &Rc<Self>) {
+    fn on_wallhaven(&self) -> bool {
+        self.wallpaper
+            .borrow()
+            .as_ref()
+            .is_some_and(|state| state.active.is_some())
+    }
+
+    fn submit_wallhaven_query(self: &Rc<Self>) {
+        self.start_wallpaper_search(self.wallhaven_query.text().to_string());
+    }
+
+    fn start_wallpaper_search(self: &Rc<Self>, query: String) {
         let (executable, preset, generation) = {
             let mut state = self.wallpaper.borrow_mut();
             let Some(state) = state.as_mut() else { return };
-            let Some((preset, generation)) = state.searching() else {
+            let Some((preset, generation)) = state.searching(query.clone()) else {
                 return;
             };
             (state.executable.clone(), preset, generation)
         };
+        self.candidates.borrow_mut().clear();
+        *self.selected.borrow_mut() = None;
+        self.thumbnail_scheduler.borrow_mut().clear();
         self.retry.set_visible(false);
         self.update_wallpaper_controls();
         self.render();
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let request_preset = preset.clone();
+            let request_query = query.clone();
             let result = gio::spawn_blocking(move || {
-                provider_command(&executable, &["search", &request_preset])
+                provider_command(&executable, &["search", &request_preset, &request_query])
             })
             .await
             .map_err(|error| format!("Wallhaven worker failed: {error:?}"))
@@ -1463,7 +1613,7 @@ impl Chooser {
                 Ok(rows)
             });
             if let Some(chooser) = weak.upgrade() {
-                chooser.wallpaper_search_finished(&preset, generation, result);
+                chooser.wallpaper_search_finished(&preset, &query, generation, result);
             }
         });
     }
@@ -1471,6 +1621,7 @@ impl Chooser {
     fn wallpaper_search_finished(
         self: &Rc<Self>,
         preset: &str,
+        query: &str,
         generation: u64,
         result: Result<Vec<Candidate>, String>,
     ) {
@@ -1479,31 +1630,36 @@ impl Chooser {
             || !state.as_mut().is_some_and(|state| {
                 state.complete(&WallpaperPending::Search {
                     preset: preset.to_string(),
+                    query: query.to_string(),
                     generation,
                 })
             })
         {
             return;
         }
-        let active = state
-            .as_ref()
-            .is_some_and(|state| state.active.as_deref() == Some(preset));
         let result = match result {
-            Ok(rows) if !rows.is_empty() => state
+            Ok(rows) => state
                 .as_mut()
                 .expect("wallpaper state")
                 .display_or_cache(preset, rows)
                 .map(Ok),
-            Ok(_) if active => Some(Err("No Wallhaven results for this preset".to_string())),
-            Err(error) if active => Some(Err(error)),
-            _ => None,
+            Err(error) => state
+                .as_mut()
+                .expect("wallpaper state")
+                .search_failed(preset, error)
+                .map(Err),
         };
         drop(state);
         if let Some(result) = result {
             match result {
                 Ok(rows) => {
                     *self.candidates.borrow_mut() = rows;
-                    self.status.set_label("");
+                    self.status
+                        .set_label(if self.candidates.borrow().is_empty() {
+                            "No Wallhaven results"
+                        } else {
+                            ""
+                        });
                     self.status.set_tooltip_text(None);
                     self.retry.set_visible(false);
                     *self.selected.borrow_mut() = None;
@@ -1614,15 +1770,17 @@ impl Chooser {
         });
         self.scroll.add_controller(wheel);
 
-        self.search.connect_changed({
-            let weak = Rc::downgrade(self);
-            move |_| {
-                if let Some(chooser) = weak.upgrade() {
-                    chooser.ensure_visible_selection();
-                    chooser.render();
+        for entry in [&self.search, &self.filter] {
+            entry.connect_changed({
+                let weak = Rc::downgrade(self);
+                move |_| {
+                    if let Some(chooser) = weak.upgrade() {
+                        chooser.ensure_visible_selection();
+                        chooser.render();
+                    }
                 }
-            }
-        });
+            });
+        }
         self.search.connect_activate({
             let weak = Rc::downgrade(self);
             move |_| {
@@ -1679,10 +1837,17 @@ impl Chooser {
                     gdk::Key::Home => chooser.select_at(0),
                     gdk::Key::End => chooser.select_at(usize::MAX),
                     gdk::Key::Return | gdk::Key::KP_Enter => {
-                        if chooser.random.has_focus() {
+                        if chooser.random.has_focus() || chooser.wallhaven_search.has_focus() {
                             return glib::Propagation::Proceed;
                         }
-                        chooser.accept();
+                        let query_focused = chooser.wallhaven_query.has_focus()
+                            || gtk4::prelude::GtkWindowExt::focus(&chooser.window)
+                                .is_some_and(|focus| focus.is_ancestor(&chooser.wallhaven_query));
+                        if chooser.on_wallhaven() && query_focused {
+                            chooser.submit_wallhaven_query();
+                        } else {
+                            chooser.accept();
+                        }
                     }
                     _ => return glib::Propagation::Proceed,
                 }
@@ -1764,7 +1929,12 @@ impl Chooser {
     }
 
     fn query_indices(&self) -> Vec<usize> {
-        matching_indices(&self.candidates.borrow(), self.search.text().trim())
+        let query = if self.on_wallhaven() {
+            self.filter.text()
+        } else {
+            self.search.text()
+        };
+        matching_indices(&self.candidates.borrow(), &query)
     }
 
     fn update_random_sensitivity(&self) {
@@ -2809,6 +2979,7 @@ mod tests {
             icon: None,
             preview: None,
             palette: None,
+            tags: Vec::new(),
         }
     }
 
@@ -2823,6 +2994,22 @@ mod tests {
         // Both first two match as a fuzzy subsequence.  The chooser uses the
         // shared matcher but does not re-sort script-provided choices.
         assert_eq!(matching_indices(&candidates, "blu"), vec![0, 1]);
+    }
+
+    #[test]
+    fn fuzzy_filter_matches_tag_names_and_aliases_without_metadata() {
+        let mut candidates: Vec<Candidate> = serde_json::from_str(
+            r#"[{"id":"one","label":"First"},{"id":"two","label":"Second","tags":[]}]"#,
+        )
+        .expect("tagless inputs remain valid");
+        candidates[0].tags = vec!["Blue Sky".into(), "azure heavens".into()];
+        assert_eq!(matching_indices(&candidates, "bsk"), vec![0]);
+        assert_eq!(matching_indices(&candidates, "azhv"), vec![0]);
+        assert_eq!(
+            matching_indices(&candidates, "mountain"),
+            Vec::<usize>::new()
+        );
+        assert_eq!(matching_indices(&candidates, ""), vec![0, 1]);
     }
 
     #[test]
@@ -3219,11 +3406,11 @@ mod tests {
             generation: 0,
         };
         let mut rows = vec![candidate("pool", "Local", None)];
-        assert_eq!(state.searching(), None, "Pool never searches");
+        assert_eq!(state.searching(String::new()), None, "Pool never searches");
         assert!(state.switch(Some("nature"), &mut rows));
         assert!(rows.is_empty());
         let (_, first) = state
-            .searching()
+            .searching(String::new())
             .expect("first Wallhaven activation searches");
         assert!(state.blocks_selection());
         assert!(
@@ -3243,13 +3430,14 @@ mod tests {
             "returning to a pending search shows the spinner"
         );
         assert_eq!(
-            state.searching(),
+            state.searching(String::new()),
             None,
             "reentry must not launch a duplicate"
         );
         assert!(state.switch(None, &mut rows));
         assert!(state.complete(&WallpaperPending::Search {
             preset: "nature".into(),
+            query: String::new(),
             generation: first
         }));
         assert!(
@@ -3273,6 +3461,11 @@ mod tests {
             !state.switch(None, &mut rows),
             "save disables Pool and Cancel until complete"
         );
+        assert_eq!(
+            state.searching("+new query".into()),
+            None,
+            "saving blocks query submission"
+        );
         assert!(
             matches!(state.pending, Some(WallpaperPending::Save { .. })),
             "save keeps its spinner while the provider is running"
@@ -3284,11 +3477,12 @@ mod tests {
         assert_eq!(state.active.as_deref(), Some("nature"));
         assert!(state.switch(Some("mountains"), &mut rows));
         assert!(rows.is_empty());
-        let (_, superseded) = state.searching().expect("new preset searches");
+        let (_, superseded) = state.searching(String::new()).expect("new preset searches");
         assert!(state.switch(Some("nature"), &mut rows));
         assert_eq!(rows[0].id, "9d82vk");
         assert!(!state.complete(&WallpaperPending::Search {
             preset: "mountains".into(),
+            query: String::new(),
             generation: superseded
         }));
         assert_eq!(
@@ -3297,10 +3491,11 @@ mod tests {
         );
         assert!(state.switch(Some("mountains"), &mut rows));
         let (_, current) = state
-            .searching()
+            .searching(String::new())
             .expect("superseded preset searches on reentry");
         assert!(!state.complete(&WallpaperPending::Search {
             preset: "mountains".into(),
+            query: String::new(),
             generation: superseded
         }));
         assert!(
@@ -3309,6 +3504,7 @@ mod tests {
         );
         assert!(state.complete(&WallpaperPending::Search {
             preset: "mountains".into(),
+            query: String::new(),
             generation: current
         }));
         rows = state
@@ -3319,5 +3515,92 @@ mod tests {
         let preset = state.preferred_preset().unwrap().to_owned();
         assert!(state.switch(Some(&preset), &mut rows));
         assert_eq!(rows[0].id, "mountain", "last preset uses cached results");
+        let query_a = "+nature -car @someone type:png".to_string();
+        let query_b = "like:9d82vk".to_string();
+        let (_, first_query) = state.searching(query_a.clone()).expect("submit query A");
+        rows.clear();
+        assert!(
+            state.blocks_selection(),
+            "old results cannot be saved during a new query"
+        );
+        let (_, latest_query) = state
+            .searching(query_b.clone())
+            .expect("query B supersedes A");
+        assert!(!state.complete(&WallpaperPending::Search {
+            preset: "mountains".into(),
+            query: query_a.clone(),
+            generation: first_query,
+        }));
+        assert!(
+            !state.complete(&WallpaperPending::Search {
+                preset: "mountains".into(),
+                query: query_a,
+                generation: latest_query,
+            }),
+            "a different query cannot complete the latest request"
+        );
+        assert!(state.blocks_selection());
+        assert!(state.complete(&WallpaperPending::Search {
+            preset: "mountains".into(),
+            query: query_b.clone(),
+            generation: latest_query,
+        }));
+        rows = state
+            .display_or_cache("mountains", vec![candidate("latest", "Latest", None)])
+            .expect("latest results display");
+        assert!(state.switch(None, &mut rows));
+        assert_eq!(rows[0].id, "pool", "queries never replace Local rows");
+        assert!(state.switch(Some("mountains"), &mut rows));
+        assert_eq!(rows[0].id, "latest");
+        assert_eq!(state.current_search().unwrap().query, query_b);
+        assert!(
+            !state.needs_search(),
+            "returning to results does not submit again"
+        );
+
+        let failed_query = "+nebula -people".to_string();
+        let (_, failed_generation) = state.searching(failed_query.clone()).expect("new query");
+        rows.clear();
+        assert!(state.switch(None, &mut rows));
+        assert!(state.complete(&WallpaperPending::Search {
+            preset: "mountains".into(),
+            query: failed_query.clone(),
+            generation: failed_generation,
+        }));
+        assert_eq!(state.search_failed("mountains", "HTTP 429".into()), None);
+        assert!(state.switch(Some("mountains"), &mut rows));
+        assert!(
+            rows.is_empty(),
+            "failed new query cannot revive old results"
+        );
+        assert_eq!(state.retry_query(), Some(failed_query.as_str()));
+        assert!(
+            !state.needs_search(),
+            "failed queries wait for explicit retry"
+        );
+        let retry_query = state.retry_query().unwrap().to_owned();
+        let (_, retry_generation) = state
+            .searching(retry_query.clone())
+            .expect("retry submitted query");
+        assert!(state.complete(&WallpaperPending::Search {
+            preset: "mountains".into(),
+            query: retry_query,
+            generation: retry_generation,
+        }));
+        rows = state
+            .display_or_cache("mountains", Vec::new())
+            .expect("empty query completes");
+        assert_eq!(state.retry_query(), None);
+        assert!(state.switch(None, &mut rows));
+        assert!(state.switch(Some("mountains"), &mut rows));
+        assert!(
+            !state.needs_search(),
+            "empty results are cached, not repeatedly requested"
+        );
+        assert!(rows.is_empty());
+        assert_eq!(
+            state.cached.keys().cloned().collect::<HashSet<_>>(),
+            HashSet::from(["nature".to_string(), "mountains".to_string()])
+        );
     }
 }

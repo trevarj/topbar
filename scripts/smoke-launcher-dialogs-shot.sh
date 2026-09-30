@@ -1371,7 +1371,7 @@ if [ -e "$SMOKE_WALLPAPER_GATE/search.ready" ]; then
   echo "Wallhaven searched before tab activation" >&2
   fail=1
 fi
-# Ctrl+Tab switches tabs without moving focus away from the search field.
+# Ctrl+Tab switches tabs and focuses the Wallhaven API query.
 wtype -M ctrl -k Tab -m ctrl
 if wait_for_marker "$SMOKE_WALLPAPER_GATE/search.ready" "Wallhaven search gate"; then
   check assert_mapped topbar-chooser "same chooser during search"
@@ -1397,8 +1397,55 @@ if wait_for_marker "$SMOKE_WALLPAPER_GATE/search.ready" "Wallhaven search gate";
     echo "wallpaper chooser resized when Wallhaven results loaded" >&2
     fail=1
   fi
+  operator_query='+nature -people @someone type:png like:9d82vk & café'
+  type_text "$operator_query"
+  if [ -e "$SMOKE_WALLPAPER_GATE/query.ready" ] || [ -e "$SMOKE_WALLPAPER_GATE/save.ready" ]; then
+    echo "editing the API query searched or saved without submission" >&2
+    fail=1
+  fi
   key_press Return
+  if wait_for_marker "$SMOKE_WALLPAPER_GATE/query.ready" "submitted Wallhaven query"; then
+    if [ "$(cat "$SMOKE_WALLPAPER_GATE/query.value")" != "$operator_query" ]; then
+      echo "Wallhaven query operators were not forwarded unchanged" >&2
+      fail=1
+    fi
+    if [ -e "$SMOKE_WALLPAPER_GATE/save.ready" ]; then
+      echo "Enter in the Wallhaven query saved instead of searching" >&2
+      fail=1
+    fi
+    check assert_mapped topbar-chooser "query Enter leaves chooser mapped"
+    touch "$SMOKE_WALLPAPER_GATE/query.release"
+    check shot wallpaper-tabs-query-results topbar-chooser
+    # Query -> Search button -> Filter results. Only the second row has this
+    # fuzzy tag alias; neither label nor stable ID contains the subsequence.
+    key_press Tab
+    key_press Tab
+    type_text "stcl"
+    check shot wallpaper-tabs-tag-filtered topbar-chooser
+    wtype -M ctrl -k a -m ctrl
+    key_press BackSpace
+    check shot wallpaper-tabs-filter-cleared topbar-chooser
+    type_text "stcl"
+    check shot wallpaper-tabs-tag-selected topbar-chooser
+    for state in query-results tag-filtered filter-cleared tag-selected; do
+      measured=$(wallpaper_dialog_bounds "$art/wallpaper-tabs-$state.png") || fail=1
+      if [ "$measured" != "$tabbed_bounds" ]; then
+        echo "wallpaper chooser resized on $state: $tabbed_bounds -> $measured" >&2
+        fail=1
+      fi
+    done
+    # Filter -> sole matching result -> Cancel -> Apply. Space activates the
+    # actual Apply button, and the provider rejects any other selected ID.
+    key_press Tab
+    key_press Tab
+    key_press Tab
+    key_press space
+  fi
   if wait_for_marker "$SMOKE_WALLPAPER_GATE/save.ready" "Wallhaven save gate"; then
+    if [ "$(cat "$SMOKE_WALLPAPER_GATE/save.ready")" != ab12cd ]; then
+      echo "tag-only fuzzy filtering did not select its matching wallpaper" >&2
+      fail=1
+    fi
     check assert_mapped topbar-chooser "same chooser during save"
     check assert_mapped topbar-chooser-backdrop "same backdrop during save"
     snap wallpaper-tabs-save-spinner-a 2
@@ -1413,8 +1460,13 @@ if wait_for_marker "$SMOKE_WALLPAPER_GATE/search.ready" "Wallhaven search gate";
     touch "$SMOKE_WALLPAPER_GATE/save.release"
   fi
 fi
-# Always release both gates before waiting so failures cannot strand a worker.
-touch "$SMOKE_WALLPAPER_GATE/search.release" "$SMOKE_WALLPAPER_GATE/save.release"
+# Release every gate and cancel a failed scenario rather than stranding a chooser.
+touch "$SMOKE_WALLPAPER_GATE/search.release" "$SMOKE_WALLPAPER_GATE/query.release" \
+  "$SMOKE_WALLPAPER_GATE/save.release"
+if [ ! -e "$SMOKE_WALLPAPER_GATE/save.ready" ]; then
+  fail=1
+  key_press Escape
+fi
 if ! wait "$chooser_pid"; then
   echo "tabbed chooser did not save the selected wallpaper" >&2
   fail=1

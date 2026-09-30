@@ -393,13 +393,21 @@ cat >>"$tabbed_provider" <<'SH'
 set -eu
 case "$1:$2" in
   search:nature)
-    printf 'search\n' >"$SMOKE_WALLPAPER_GATE/search.ready"
-    while [ ! -f "$SMOKE_WALLPAPER_GATE/search.release" ]; do sleep 0.1; done
-    printf '[{"id":"9d82vk","label":"Wallhaven Nature / 9d82vk","preview_path":"%s"}]\n' "$SMOKE_WALLPAPER_IMAGE"
+    [ "$#" -eq 3 ] || exit 2
+    if [ -z "$3" ]; then
+      printf 'search\n' >"$SMOKE_WALLPAPER_GATE/search.ready"
+      while [ ! -f "$SMOKE_WALLPAPER_GATE/search.release" ]; do sleep 0.1; done
+    else
+      printf '%s' "$3" >"$SMOKE_WALLPAPER_GATE/query.value"
+      touch "$SMOKE_WALLPAPER_GATE/query.ready"
+      while [ ! -f "$SMOKE_WALLPAPER_GATE/query.release" ]; do sleep 0.1; done
+    fi
+    printf '[{"id":"9d82vk","label":"Wallhaven Nature / 9d82vk","tags":["Blue Sky"],"preview_path":"%s"},{"id":"ab12cd","label":"Wallhaven Nature / ab12cd","tags":["solar nebula","stellar clouds"],"preview_path":"%s"}]\n' \
+      "$SMOKE_WALLPAPER_IMAGE" "$SMOKE_WALLPAPER_IMAGE"
     ;;
   save:nature)
-    [ "$3" = 9d82vk ] || exit 2
-    printf 'save\n' >"$SMOKE_WALLPAPER_GATE/save.ready"
+    [ "$#" -eq 3 ] && [ "$3" = ab12cd ] || exit 2
+    printf '%s\n' "$3" >"$SMOKE_WALLPAPER_GATE/save.ready"
     while [ ! -f "$SMOKE_WALLPAPER_GATE/save.release" ]; do sleep 0.1; done
     printf '{"path":"%s"}\n' "$SMOKE_WALLPAPER_IMAGE"
     ;;

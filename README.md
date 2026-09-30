@@ -118,6 +118,22 @@ The volume and brightness commands act on PulseAudio and logind **directly**
 and only then try to raise an OSD, so a media key still works when the panel is
 not running and when the configuration is broken.
 
+`topbar choose --layout wallpapers --wallpaper-provider PROGRAM` accepts
+`{"pool":[...],"presets":[{"id":"nature","label":"Nature"}]}` on stdin. Local
+filters immediately; Wallhaven's query is submitted only with Enter or Search.
+`Filter results` fuzzy-matches loaded labels, IDs, subtitles, and optional
+`tags: ["tag name", "tag alias"]` without making API requests. Apply saves the
+selected wallpaper; Enter in the Wallhaven query never applies it.
+
+The provider protocol is `PROGRAM search PRESET QUERY` (empty QUERY uses the
+preset defaults), returning a candidate array with absolute local preview paths,
+and `PROGRAM save PRESET ID`, returning `{"path":"/absolute/saved/image"}`.
+Explicit queries are passed unchanged for the provider to URL-encode, preserving
+Wallhaven operators without appending preset terms. The chooser keeps only the
+latest submitted query/results per preset and retries that submitted query.
+Provider-mode output is `{"kind":"pool","id":"..."}` or
+`{"kind":"saved","path":"..."}`; cancellation exits 1.
+
 ## Configuration
 
 Configuration lives at `~/.config/topbar/config.toml`. Every key is optional;
