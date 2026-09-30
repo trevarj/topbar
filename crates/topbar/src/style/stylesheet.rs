@@ -2087,6 +2087,32 @@ window.tooltip-window {
     color: var(--color-foreground);
 }
 
+.tooltip-surface calendar {
+    background: transparent;
+    border: none;
+    padding: 0;
+    color: var(--color-foreground);
+    font-family: var(--font-family);
+    font-size: var(--font-size);
+}
+
+.tooltip-surface calendar .day-number {
+    min-width: 22px;
+    min-height: 22px;
+    padding: 2px;
+    border-radius: 9999px;
+}
+
+.tooltip-surface calendar .day-number:selected {
+    background-color: var(--color-accent);
+    color: var(--color-on-accent);
+    font-weight: 700;
+}
+
+.tooltip-surface calendar .other-month {
+    opacity: 0.35;
+}
+
 /* ===== The volume/brightness capsule ===== */
 
 window.osd-window {

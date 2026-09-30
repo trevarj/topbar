@@ -35,6 +35,11 @@ pub const MIC_HIGH: &str = "microphone-sensitivity-high-symbolic";
 /// The backlight.
 pub const BRIGHTNESS: &str = "display-brightness-symbolic";
 
+/// Choose a desktop theme.
+pub const THEME: &str = "preferences-desktop-appearance-symbolic";
+/// Choose a desktop wallpaper.
+pub const WALLPAPER: &str = "image-x-generic-symbolic";
+
 /// One row of the output chooser.
 ///
 /// The same icon on every sink, on purpose. PulseAudio tells the panel a

@@ -26,7 +26,7 @@ use topbar_services::{
 
 use crate::anim::{Animation, AnimationParams, Easing};
 use crate::bridge::{self, BindingGuard};
-use crate::style::classes;
+use crate::style::{classes, icons};
 use crate::surfaces::modal;
 use crate::wayland::blur::BlurAttachment;
 
@@ -1270,8 +1270,8 @@ impl Launcher {
                     window_icon = Some(image.clone());
                     image
                 }
-                ResultItem::Theme => Image::from_icon_name("preferences-desktop-theme-symbolic"),
-                ResultItem::Wallpaper => Image::from_icon_name("image-x-generic-symbolic"),
+                ResultItem::Theme => Image::from_icon_name(icons::THEME),
+                ResultItem::Wallpaper => Image::from_icon_name(icons::WALLPAPER),
                 ResultItem::File(_) => unreachable!("file rows do not have icons"),
             };
             icon.add_css_class(classes::LAUNCHER_ICON);

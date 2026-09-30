@@ -38,7 +38,7 @@ use topbar_core::config::{AppearanceConfig, QuickSettingsConfig};
 use topbar_services::{NetworkState, Services};
 
 use crate::bridge::{self, ActionScope, BindingGuard};
-use crate::style::classes;
+use crate::style::{classes, icons};
 use crate::surfaces::layer_popover;
 use crate::surfaces::popovers;
 use crate::surfaces::popovers::PopoverContent;
@@ -163,12 +163,24 @@ impl Panel {
         content.append(toggles.root());
 
         let appearance_row = gtk4::Box::new(Orientation::Horizontal, 8);
-        for (label, command) in [
-            ("Theme", appearance.theme_command.as_ref()),
-            ("Wallpaper", appearance.wallpaper_command.as_ref()),
+        for (label, icon_name, command) in [
+            ("Theme", icons::THEME, appearance.theme_command.as_ref()),
+            (
+                "Wallpaper",
+                icons::WALLPAPER,
+                appearance.wallpaper_command.as_ref(),
+            ),
         ] {
             let Some(command) = command else { continue };
-            let button = Button::with_label(label);
+            let button = Button::new();
+            let line = gtk4::Box::new(Orientation::Horizontal, 8);
+            line.set_halign(gtk4::Align::Center);
+            line.set_valign(gtk4::Align::Center);
+            let icon = gtk4::Image::from_icon_name(icon_name);
+            icon.add_css_class(classes::QS_ICON);
+            line.append(&icon);
+            line.append(&gtk4::Label::new(Some(label)));
+            button.set_child(Some(&line));
             button.add_css_class(classes::DIALOG_BUTTON);
             button.set_hexpand(true);
             let argv = command.clone();

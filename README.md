@@ -207,8 +207,11 @@ accept the keys but act only on the buttons they have free.
 |---|---|---|
 | `format` | `"%a %b %-d  %H:%M"` | `strftime` format for the panel label. |
 | `control_panel` | `false` | Open the notifications/calendar panel on click. |
-| `show_week_numbers` | `true` | ISO week numbers in the calendar. |
+| `show_week_numbers` | `true` | ISO week numbers in the hover calendar and click panel. |
 | `world_clocks` | `[]` | Extra time zones: `{ label = "UTC", timezone = "Etc/UTC" }`. |
+
+Hovering the clock shows the full local date and a small current-month calendar
+with today selected, even when `control_panel = false`.
 
 ### `[widgets.weather]`
 

@@ -228,7 +228,7 @@ any workspace asking for attention.
 |---|---|---|---|
 | `format` | string | `"%a %b %-d  %H:%M"` | `strftime` format for the panel label. |
 | `control_panel` | bool | `false` | Open the notifications/calendar panel on click. |
-| `show_week_numbers` | bool | `true` | Show ISO week numbers in the calendar. |
+| `show_week_numbers` | bool | `true` | Show ISO week numbers in the hover calendar and click panel. |
 | `world_clocks` | array of tables | `[]` | Extra time zones listed in the control panel. |
 
 `format` must not be empty. Each `world_clocks` entry is a table with a
@@ -239,6 +239,19 @@ world_clocks = [
   { label = "New York", timezone = "America/New_York" },
   { label = "UTC", timezone = "Etc/UTC" },
 ]
+```
+
+Hovering the clock shows the full local date and a passive mini calendar of the
+current month, with today selected. It follows the clock across midnight and
+resume, and works with `control_panel = false` without starting panel services.
+`world_clocks` does not change the clock's local date.
+
+The display-dependent GTK regression checks can run on a real display or under
+Xvfb (`xvfb-run` must be available; each command gets a fresh GTK process):
+
+```sh
+nix develop -c env GDK_BACKEND=x11 xvfb-run -a cargo test -p topbar widgets::clock::tests::calendar_tooltip_tracks_local_date_rollover -- --ignored --exact
+nix develop -c env GDK_BACKEND=x11 xvfb-run -a cargo test -p topbar surfaces::tooltip::gtk_tests::text_tooltip_replaces_calendar_content -- --ignored --exact
 ```
 
 `control_panel = true` is what makes the clock draw a GNOME date menu, and it
@@ -596,8 +609,9 @@ GTK sets font sizes from CSS with `pango_font_description_set_absolute_size`,
 which bypasses Pango's DPI-aware hinting; on layer-shell surfaces that can clip
 tall glyphs at some sizes. `pango_font_rendering = true` re-states each label's
 font as a Pango attribute in points, which does go through the DPI-aware path.
-It is off by default because it is a workaround for a problem most setups do
-not have.
+This applies to the bar, popovers, and notification banners, including labels
+created by replacement notifications. It is off by default because it is a
+workaround for a problem most setups do not have.
 
 ---
 
@@ -651,3 +665,11 @@ a state nobody asked for and nobody can reason about.
 
 **One key needs a restart:** `advanced.compositor`. The compositor connection
 is made once, at start-up, before GTK exists.
+
+## Appearance commands
+
+`[appearance].theme_command` and `[appearance].wallpaper_command` are argument
+arrays for the theme and wallpaper choosers. When configured, Quick Settings
+shows centered icon-and-label buttons named **Theme** and **Wallpaper**, using
+Adwaita's theme and image symbolic icons. Each button is hidden when its command
+is absent; activating it closes Quick Settings and runs the configured command.

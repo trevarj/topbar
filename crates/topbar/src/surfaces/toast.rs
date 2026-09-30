@@ -37,6 +37,7 @@ use tracing::debug;
 
 use crate::anim::{Animation, AnimationParams, Easing, SlideBox, ripple};
 use crate::bridge::{self, ActionScope, BindingGuard};
+use crate::fonts::{self, FontRendering};
 use crate::style::{self, classes};
 use crate::surfaces::layer_popover;
 use crate::wayland::activation;
@@ -94,6 +95,7 @@ pub struct ToastSurface {
     /// The banners on screen, newest first.
     cards: Rc<RefCell<Vec<Card>>>,
     services: Services,
+    font_rendering: Option<FontRendering>,
     connector: String,
     /// How far below the top edge the stack sits. See [`top_margin`].
     top_margin: i32,
@@ -135,6 +137,7 @@ impl ToastSurface {
             stack,
             cards: Rc::new(RefCell::new(Vec::new())),
             services: services.clone(),
+            font_rendering: FontRendering::from_config(config),
             connector: connector.to_string(),
             top_margin: top_margin(config),
             bindings: RefCell::new(Vec::new()),
@@ -207,6 +210,12 @@ impl ToastSurface {
                 }
                 None => self.insert(view, position),
             }
+        }
+
+        // Newly inserted cards and replacement action labels need the same
+        // opt-in typography treatment as the bar and other popup surfaces.
+        if let Some(rendering) = &self.font_rendering {
+            fonts::render_tree(rendering, &self.stack);
         }
 
         // The surface stays mapped while the last banner slides away, then

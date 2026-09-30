@@ -42,25 +42,30 @@ fn manager() -> Rc<TooltipManager> {
     MANAGER.with(Rc::clone)
 }
 
-/// A widget's tooltip text, updatable after the fact.
+/// A widget's tooltip content, with updatable text and an optional passive child.
 ///
 /// Dropping the handle does not detach the tooltip; keep it for as long as the
 /// widget lives if the text changes (the clock updates its date at midnight).
 #[derive(Clone)]
 pub struct TooltipHandle {
-    text: Rc<RefCell<String>>,
+    content: Rc<TooltipContent>,
 }
 
 impl TooltipHandle {
     /// Replace the tooltip text, updating the surface if it is on screen.
     pub fn set_text(&self, text: &str) {
-        if self.text.borrow().as_str() == text {
+        if self.content.text.borrow().as_str() == text {
             return;
         }
-        self.text.borrow_mut().clear();
-        self.text.borrow_mut().push_str(text);
-        manager().refresh(&self.text);
+        self.content.text.borrow_mut().clear();
+        self.content.text.borrow_mut().push_str(text);
+        manager().refresh(&self.content);
     }
+}
+
+struct TooltipContent {
+    text: RefCell<String>,
+    child: Option<gtk4::Widget>,
 }
 
 /// Give `widget` a tooltip.
@@ -68,17 +73,37 @@ impl TooltipHandle {
 /// The pointer controllers are installed once per call, so call it once per
 /// widget and use the returned handle to change the text later.
 pub fn attach(widget: &impl IsA<gtk4::Widget>, text: &str) -> TooltipHandle {
+    attach_content(widget, text, None)
+}
+
+/// Give `widget` a tooltip with passive content below its text.
+pub fn attach_with_child(
+    widget: &impl IsA<gtk4::Widget>,
+    text: &str,
+    child: &impl IsA<gtk4::Widget>,
+) -> TooltipHandle {
+    attach_content(widget, text, Some(child.as_ref().clone()))
+}
+
+fn attach_content(
+    widget: &impl IsA<gtk4::Widget>,
+    text: &str,
+    child: Option<gtk4::Widget>,
+) -> TooltipHandle {
     let widget = widget.as_ref();
     let handle = TooltipHandle {
-        text: Rc::new(RefCell::new(text.to_string())),
+        content: Rc::new(TooltipContent {
+            text: RefCell::new(text.to_string()),
+            child,
+        }),
     };
 
     let motion = gtk4::EventControllerMotion::new();
     motion.connect_enter({
-        let text = Rc::clone(&handle.text);
+        let content = Rc::clone(&handle.content);
         move |controller, _x, _y| {
             if let Some(widget) = controller.widget() {
-                manager().schedule(&widget, &text);
+                manager().schedule(&widget, &content);
             }
         }
     });
@@ -105,7 +130,7 @@ pub fn attach(widget: &impl IsA<gtk4::Widget>, text: &str) -> TooltipHandle {
     handle
 }
 
-/// The tooltip window itself: a layer-shell surface with a styled label.
+/// The tooltip window itself: a layer-shell surface with text and passive content.
 struct TooltipWindow {
     window: Window,
     surface: gtk4::Box,
@@ -127,7 +152,7 @@ impl TooltipWindow {
         window.set_anchor(Edge::Top, true);
         window.set_anchor(Edge::Left, true);
 
-        let surface = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+        let surface = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
         surface.add_css_class(classes::TOOLTIP_SURFACE);
 
         let label = Label::new(None);
@@ -151,10 +176,20 @@ impl TooltipWindow {
         }
     }
 
-    /// Set the text and return the width the surface wants for it.
-    fn prepare(&self, text: &str) -> i32 {
-        if self.label.text() != text {
-            self.label.set_text(text);
+    /// Set the content and return the width the surface wants for it.
+    fn prepare(&self, content: &TooltipContent) -> i32 {
+        let text = content.text.borrow();
+        if self.label.text() != *text {
+            self.label.set_text(&text);
+        }
+        let current = self.label.next_sibling();
+        if current.as_ref() != content.child.as_ref() {
+            if let Some(current) = current {
+                self.surface.remove(&current);
+            }
+            if let Some(child) = &content.child {
+                self.surface.append(child);
+            }
         }
         let (_, natural, _, _) = self.surface.measure(gtk4::Orientation::Horizontal, -1);
         if natural > 0 { natural } else { FALLBACK_WIDTH }
@@ -181,20 +216,20 @@ struct TooltipManager {
     window: RefCell<Option<TooltipWindow>>,
     pending: RefCell<Option<glib::SourceId>>,
     anchor: RefCell<Option<glib::WeakRef<gtk4::Widget>>>,
-    text: RefCell<Option<Rc<RefCell<String>>>>,
+    content: RefCell<Option<Rc<TooltipContent>>>,
     visible: Cell<bool>,
     hidden_at: Cell<Option<Instant>>,
 }
 
 impl TooltipManager {
     /// Arm the show timer for `widget`.
-    fn schedule(self: &Rc<Self>, widget: &gtk4::Widget, text: &Rc<RefCell<String>>) {
+    fn schedule(self: &Rc<Self>, widget: &gtk4::Widget, content: &Rc<TooltipContent>) {
         self.cancel_pending();
 
         let anchor = glib::WeakRef::new();
         anchor.set(Some(widget));
         *self.anchor.borrow_mut() = Some(anchor);
-        *self.text.borrow_mut() = Some(Rc::clone(text));
+        *self.content.borrow_mut() = Some(Rc::clone(content));
 
         let delay = show_delay(self.hidden_at.get().map(|at| at.elapsed()));
         let manager = Rc::clone(self);
@@ -217,13 +252,11 @@ impl TooltipManager {
         if !widget.is_mapped() {
             return;
         }
-        let text = self
-            .text
-            .borrow()
-            .as_ref()
-            .map(|text| text.borrow().clone())
-            .unwrap_or_default();
-        if text.is_empty() {
+        let content = self.content.borrow();
+        let Some(content) = content.as_ref() else {
+            return;
+        };
+        if content.text.borrow().is_empty() {
             return;
         }
 
@@ -234,28 +267,30 @@ impl TooltipManager {
             return;
         };
 
-        let width = window.prepare(&text);
+        let width = window.prepare(content);
         let center = anchor_center_x(&widget).unwrap_or(monitor_width / 2);
         window.show_at(clamp_x(center, width, monitor_width), monitor.as_ref());
         self.visible.set(true);
     }
 
-    /// Update the on-screen text if `text` belongs to the visible tooltip.
-    fn refresh(&self, text: &Rc<RefCell<String>>) {
+    /// Refresh and reclamp the surface if `content` belongs to the visible tooltip.
+    fn refresh(&self, content: &Rc<TooltipContent>) {
         if !self.visible.get() {
             return;
         }
         let matches = self
-            .text
+            .content
             .borrow()
             .as_ref()
-            .is_some_and(|current| Rc::ptr_eq(current, text));
+            .is_some_and(|current| Rc::ptr_eq(current, content));
         if !matches {
             return;
         }
-        if let Some(window) = self.window.borrow().as_ref() {
-            window.prepare(&text.borrow());
+        if content.text.borrow().is_empty() {
+            self.hide();
+            return;
         }
+        self.show();
     }
 
     /// Cancel any pending show and take the tooltip off screen.
@@ -268,7 +303,7 @@ impl TooltipManager {
             self.hidden_at.set(Some(Instant::now()));
         }
         *self.anchor.borrow_mut() = None;
-        *self.text.borrow_mut() = None;
+        *self.content.borrow_mut() = None;
     }
 
     fn cancel_pending(&self) {
@@ -356,5 +391,77 @@ mod tests {
     #[test]
     fn tooltip_wider_than_the_monitor_still_starts_on_screen() {
         assert_eq!(clamp_x(500, 2000, 1000), EDGE_MARGIN);
+    }
+}
+
+#[cfg(test)]
+mod gtk_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires a GTK display; run under Xvfb with --ignored --exact"]
+    fn text_tooltip_replaces_calendar_content() {
+        gtk4::init().expect("GTK display");
+        // Exercise the actual popup contents on X11, without layer-shell.
+        let surface = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+        let label = Label::new(None);
+        surface.append(&label);
+        let window = Window::new();
+        window.set_child(Some(&surface));
+        let tooltip = TooltipWindow {
+            window,
+            surface,
+            label,
+        };
+        let calendar = gtk4::Calendar::new();
+        let date = TooltipContent {
+            text: RefCell::new("Wednesday, September 30, 2026".to_string()),
+            child: Some(calendar.clone().upcast()),
+        };
+        let ordinary = TooltipContent {
+            text: RefCell::new("Volume: 50%".to_string()),
+            child: None,
+        };
+        tooltip.prepare(&date);
+        tooltip.window.present();
+        while glib::MainContext::default().pending() {
+            glib::MainContext::default().iteration(false);
+        }
+        assert!(calendar.is_mapped());
+        tooltip.prepare(&ordinary);
+        assert!(calendar.parent().is_none());
+        assert_eq!(tooltip.label.text(), "Volume: 50%");
+        assert!(tooltip.label.next_sibling().is_none());
+        tooltip.prepare(&date);
+        assert_eq!(tooltip.label.text(), "Wednesday, September 30, 2026");
+        assert_eq!(calendar.parent(), Some(tooltip.surface.clone().upcast()));
+        tooltip.prepare(&ordinary);
+        let content = Rc::new(ordinary);
+        let handle = TooltipHandle {
+            content: Rc::clone(&content),
+        };
+        let manager = manager();
+        *manager.anchor.borrow_mut() =
+            Some(tooltip.label.clone().upcast::<gtk4::Widget>().downgrade());
+        *manager.content.borrow_mut() = Some(content);
+        manager.visible.set(true);
+        *manager.window.borrow_mut() = Some(tooltip);
+        assert!(
+            manager
+                .window
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .window
+                .is_visible()
+        );
+        // A custom script may clear its tooltip while the anchor stays mapped.
+        handle.set_text("");
+        let tooltip = manager.window.borrow_mut().take().unwrap();
+        assert!(
+            !tooltip.window.is_visible(),
+            "cleared tooltip must disappear"
+        );
+        tooltip.window.close();
     }
 }

@@ -10,9 +10,9 @@ use std::fmt::Write as _;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
 
-use chrono::{DateTime, Local, Timelike};
+use chrono::{DateTime, Datelike, Local, NaiveDate, Timelike};
 use gtk4::prelude::*;
-use gtk4::{Image, Label, glib};
+use gtk4::{Calendar, Image, Label, glib};
 use topbar_core::config::{ClockConfig, WeatherConfig};
 use tracing::warn;
 
@@ -20,7 +20,7 @@ use crate::bar::BarContext;
 use crate::bridge::{self, BindingGuard};
 use crate::style::{classes, icons};
 use crate::surfaces::popovers::{self, PopoverContent, PopoverHandle};
-use crate::surfaces::tooltip::TooltipHandle;
+use crate::surfaces::tooltip::{self, TooltipHandle};
 use crate::widgets::control_panel::ControlPanel;
 use crate::widgets::shell::WidgetShell;
 
@@ -90,9 +90,14 @@ impl ClockWidget {
                 }
             });
 
+        let calendar = tooltip_calendar(config.show_week_numbers);
+        let tooltip = tooltip::attach_with_child(shell.root(), "", &calendar);
         let inner = Rc::new(ClockInner {
             label,
-            tooltip: shell.set_tooltip(""),
+            tooltip,
+            calendar,
+            date: Cell::new(None),
+            anchor: shell.root().clone().upcast(),
             format: config.format.clone(),
             per_second: needs_seconds(&config.format),
             timer: RefCell::new(None),
@@ -135,6 +140,9 @@ impl ClockWidget {
 struct ClockInner {
     label: Label,
     tooltip: TooltipHandle,
+    calendar: Calendar,
+    date: Cell<Option<NaiveDate>>,
+    anchor: gtk4::Widget,
     format: String,
     per_second: bool,
     timer: RefCell<Option<glib::SourceId>>,
@@ -191,8 +199,26 @@ impl ClockInner {
         if self.label.text() != text {
             self.label.set_text(&text);
         }
-        if let Some(date) = render(TOOLTIP_FORMAT, now) {
-            self.tooltip.set_text(&date);
+        let today = now.date_naive();
+        if self.date.get() != Some(today) {
+            // Calendar consumes civil date fields; UTC is only a date carrier,
+            // not a conversion of the clock's local day.
+            if let Ok(date) = glib::DateTime::from_utc(
+                today.year(),
+                today.month() as i32,
+                today.day() as i32,
+                0,
+                0,
+                0.0,
+            ) {
+                self.calendar.select_day(&date);
+            }
+            if let Some(date) = render(TOOLTIP_FORMAT, now) {
+                self.anchor
+                    .update_property(&[gtk4::accessible::Property::Description(&date)]);
+                self.tooltip.set_text(&date);
+            }
+            self.date.set(Some(today));
         }
     }
 
@@ -222,6 +248,17 @@ impl Drop for ClockInner {
             source.remove();
         }
     }
+}
+
+fn tooltip_calendar(show_week_numbers: bool) -> Calendar {
+    let calendar = Calendar::new();
+    // ponytail: the full-date label is the heading; omit unusable navigation.
+    calendar.set_show_heading(false);
+    calendar.set_show_day_names(true);
+    calendar.set_show_week_numbers(show_week_numbers);
+    calendar.set_can_target(false);
+    calendar.set_focusable(false);
+    calendar
 }
 
 /// Whether the unread dot belongs on the bar.
@@ -295,6 +332,57 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
+
+    #[test]
+    #[ignore = "requires a GTK display; run under Xvfb with --ignored --exact"]
+    fn calendar_tooltip_tracks_local_date_rollover() {
+        gtk4::init().expect("GTK display");
+        for show_week_numbers in [false, true] {
+            let shell = WidgetShell::new(classes::CLOCK);
+            let calendar = tooltip_calendar(show_week_numbers);
+            let inner = ClockInner {
+                label: Label::new(None),
+                tooltip: tooltip::attach_with_child(shell.root(), "", &calendar),
+                calendar,
+                date: Cell::new(None),
+                anchor: shell.root().clone().upcast(),
+                format: "%H:%M".to_string(),
+                per_second: false,
+                timer: RefCell::new(None),
+                minute: Cell::new(0),
+                listeners: RefCell::new(Vec::new()),
+            };
+            let window = gtk4::Window::new();
+            window.set_child(Some(&inner.calendar));
+            window.present();
+            while glib::MainContext::default().pending() {
+                glib::MainContext::default().iteration(false);
+            }
+            assert!(inner.calendar.is_mapped());
+            assert_eq!(inner.calendar.shows_week_numbers(), show_week_numbers);
+            // All use the same minute, including a resume-sized jump.
+            for (year, month, day) in [
+                (2023, 12, 31),
+                (2024, 1, 1),
+                (2024, 2, 28),
+                (2024, 2, 29),
+                (2024, 3, 1),
+            ] {
+                let now = Local
+                    .with_ymd_and_hms(year, month, day, 12, 0, 0)
+                    .single()
+                    .expect("unambiguous local date");
+                inner.render(now);
+                let selected = inner.calendar.date();
+                assert_eq!(
+                    (selected.year(), selected.month(), selected.day_of_month()),
+                    (year, month as i32, day as i32),
+                );
+            }
+            window.close();
+            window.set_child(None::<&gtk4::Widget>);
+        }
+    }
 
     #[test]
     fn detects_formats_that_show_seconds() {
