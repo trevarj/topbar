@@ -200,14 +200,6 @@ window never eats desktop clicks. The expiry timer lives in the notification
 than a local `SourceId`, so a banner replaced over D-Bus mid-hover cannot end
 up with two timers.
 
-Optional notification sounds are a service-side receipt effect, never a GTK
-render effect. New admitted external banners may launch bounded asynchronous
-`paplay` playback of a packaged sound or a user-selected local file at low stream
-volume. Choice and custom path share notification state persistence with Do Not
-Disturb. Custom paths are validated on a blocking worker before an atomic
-preference update. Quiet hints, DND and replacements suppress playback.
-Playback failures only warn and leave notification delivery intact.
-
 **The OSD capsule** (`surfaces/osd.rs`) takes no keyboard focus and has an empty
 input region, so a press goes through to whatever is underneath. Its timer is a
 reset rather than a queue: a second event retargets the fill and restarts the

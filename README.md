@@ -19,9 +19,9 @@ weather forecast.
 - **workspaces** — GNOME Activities-style dots with an animated active pill,
   filtered to the monitor they are on. Urgent workspaces pulse.
 - **clock** — any `strftime` format, aligned to the boundary, with the date
-  menu behind it: notification history with grouping, Do Not Disturb and optional
-  configurable notification sounds, a calendar, world clocks, MPRIS media controls
-  and a five-day forecast. A dot beside the time marks unseen notification history.
+  menu behind it: notification history with grouping and Do Not Disturb, a calendar,
+  world clocks, MPRIS media controls and a five-day forecast. A dot beside the time
+  marks unseen notification history.
 - **weather** — Open-Meteo current conditions and forecast, with a location
   search dialog. One cache for the whole panel.
 - **crypto** — bitcoin, ethereum and monero prices from CoinGecko, singly or as

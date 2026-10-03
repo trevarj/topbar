@@ -516,12 +516,6 @@ pub const DND_ROW: &str = "dnd-row";
 pub const DND_LABEL: &str = "dnd-label";
 /// The notification column's Do Not Disturb switch.
 pub const NOTIFICATION_DND: &str = "notification-dnd";
-/// The native notification sound selector beside Do Not Disturb.
-pub const NOTIFICATION_SOUND: &str = "notification-sound";
-/// The custom notification sound's editable local path.
-pub const NOTIFICATION_SOUND_PATH: &str = "notification-sound-path";
-/// Apply a custom notification sound path.
-pub const NOTIFICATION_SOUND_APPLY: &str = "notification-sound-apply";
 /// The notifications column's header row.
 pub const NOTIFICATION_HEADER: &str = "notification-header";
 /// The Clear button in it.
@@ -975,9 +969,6 @@ pub const ALL: &[&str] = &[
     DND_ROW,
     DND_LABEL,
     NOTIFICATION_DND,
-    NOTIFICATION_SOUND,
-    NOTIFICATION_SOUND_PATH,
-    NOTIFICATION_SOUND_APPLY,
     NOTIFICATION_HEADER,
     NOTIFICATION_CLEAR_ALL,
     NOTIFICATION_LIST,

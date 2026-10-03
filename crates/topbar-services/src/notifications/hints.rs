@@ -21,8 +21,6 @@ pub struct Hints {
     pub urgency: Urgency,
     /// The `transient` hint: a banner and nothing more.
     pub transient: bool,
-    /// The sender asks the daemon not to play any sound.
-    pub suppress_sound: bool,
     /// The `desktop-entry` hint.
     pub desktop_entry: Option<String>,
     /// The `image-path` hint, under either of its two spellings.
@@ -45,7 +43,6 @@ impl Hints {
                     }
                 }
                 "transient" => parsed.transient = as_bool(value).unwrap_or(false),
-                "suppress-sound" => parsed.suppress_sound = as_bool(value).unwrap_or(false),
                 "desktop-entry" => parsed.desktop_entry = as_string(value),
                 // The specification renamed these between 1.1 and 1.2 and
                 // senders never fully caught up, so both spellings are read.
@@ -258,24 +255,6 @@ mod tests {
             assert!(
                 !Hints::parse(&hints([("transient", value.clone())])).transient,
                 "{value:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn suppress_sound_is_tolerant_and_defaults_to_false() {
-        assert!(!Hints::parse(&HashMap::new()).suppress_sound);
-        for (value, expected) in [
-            (Value::Bool(true), true),
-            (Value::Bool(false), false),
-            (Value::I32(1), true),
-            (Value::I32(0), false),
-            (Value::from("true"), false),
-            (Value::Value(Box::new(Value::Bool(true))), true),
-        ] {
-            assert_eq!(
-                Hints::parse(&hints([("suppress-sound", value)])).suppress_sound,
-                expected
             );
         }
     }

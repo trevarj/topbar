@@ -602,11 +602,6 @@ window.osd-window {
     font-weight: 500;
 }
 
-button.notification-sound-apply:focus-visible {
-    outline: 2px solid var(--color-accent);
-    outline-offset: 2px;
-}
-
 /* ===== Calendar ===== */
 
 /* The chevrons sit tight against the popover's padding, GNOME style. */
@@ -1036,8 +1031,7 @@ button.crypto-remove:disabled {
 
 entry.location-search,
 entry.picker-search,
-entry.location-coordinate,
-entry.notification-sound-path {
+entry.location-coordinate {
     min-height: 32px;
     padding: 4px 14px;
     background: none;
@@ -1050,8 +1044,7 @@ entry.notification-sound-path {
 
 entry.location-search:focus-within,
 entry.picker-search:focus-within,
-entry.location-coordinate:focus-within,
-entry.notification-sound-path:focus-within {
+entry.location-coordinate:focus-within {
     border-color: var(--color-accent);
     outline: none;
 }
@@ -2308,8 +2301,7 @@ osd-bar {
 .keyboard .dnd-row switch:focus,
 .keyboard .picker-option:focus,
 .keyboard .picker-selector:focus-within,
-.keyboard .tray-menu-row:focus,
-.keyboard .notification-sound:focus-within {
+.keyboard .tray-menu-row:focus {
     outline: 2px solid var(--color-accent);
     outline-offset: -2px;
 }

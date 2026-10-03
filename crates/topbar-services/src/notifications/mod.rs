@@ -30,8 +30,8 @@ use crate::error::SvcError;
 use crate::state_store::StateStore;
 
 pub use model::{
-    Action, CloseReason, GroupView, IconSource, ImageData, NotifState, NotificationSound,
-    NotificationView, PersistedNotification, PersistedNotifications, ToastView, Urgency,
+    Action, CloseReason, GroupView, IconSource, ImageData, NotifState, NotificationView,
+    PersistedNotification, PersistedNotifications, ToastView, Urgency,
 };
 pub use policy::{DEFAULT_TIMEOUT, MAX_HISTORY, MAX_TOASTS};
 
@@ -174,58 +174,6 @@ impl NotificationsHandle {
         self.send(Command::SetDnd(dnd)).await
     }
 
-    /// Choose a built-in notification sound, or Off. Persisted across restarts.
-    pub async fn set_sound(&self, sound: NotificationSound) -> Result<(), SvcError> {
-        if sound == NotificationSound::Custom {
-            return Err(SvcError::Rejected(
-                "Choose a custom sound path first".into(),
-            ));
-        }
-        self.send(Command::SetSound(sound)).await
-    }
-
-    /// Validate a local file off the UI and daemon threads, then save path and choice together.
-    pub async fn set_custom_sound(&self, path: String) -> Result<(), SvcError> {
-        let path = tokio::task::spawn_blocking(move || {
-            use std::os::unix::fs::OpenOptionsExt;
-            let local = std::path::Path::new(&path);
-            if !local.is_absolute() {
-                return Err(SvcError::Rejected(
-                    "Custom sound must be an absolute local file path".into(),
-                ));
-            }
-            let rejected =
-                |error| SvcError::Rejected(format!("Cannot read custom sound {path}: {error}"));
-            let metadata = std::fs::metadata(local).map_err(rejected)?;
-            if !metadata.is_file() {
-                return Err(SvcError::Rejected(
-                    "Custom sound must be a regular file".into(),
-                ));
-            }
-            // A file replaced with a FIFO between metadata and open must not strand a worker.
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
-                .open(local)
-                .map_err(rejected)?;
-            if !file.metadata().map_err(rejected)?.is_file() {
-                return Err(SvcError::Rejected(
-                    "Custom sound must be a regular file".into(),
-                ));
-            }
-            Ok(path)
-        })
-        .await
-        .map_err(|error| {
-            SvcError::Rejected(format!("Custom sound validation failed: {error}"))
-        })??;
-        let (reply, answer) = oneshot::channel();
-        self.send(Command::SetCustomSound(path, reply)).await?;
-        answer
-            .await
-            .map_err(|_| SvcError::ServiceStopped("notifications"))
-    }
-
     /// Record that the user has looked at the history.
     pub async fn mark_seen(&self) -> Result<(), SvcError> {
         self.send(Command::MarkSeen).await
@@ -281,7 +229,6 @@ impl NotificationsHandle {
                 actions: Vec::new(),
                 urgency: Urgency::Normal,
                 transient: true,
-                suppress_sound: true,
                 icon: IconSource {
                     app_icon: "dialog-warning-symbolic".to_string(),
                     ..IconSource::default()

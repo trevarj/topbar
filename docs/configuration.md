@@ -116,8 +116,7 @@ is `bar.position = "bottom"`, because there is no honest way to draw it.
 topbar never edits `config.toml`. Choices made at runtime go to
 `$XDG_STATE_HOME/topbar/state.json` instead: the weather location and temperature
 unit picked in the setup dialog, the crypto entries chosen in the settings view,
-the notification history, Do Not Disturb flag, notification sound choice and
-custom sound path.
+the notification history and Do Not Disturb flag.
 
 That file is the reason three config choices behave as seeds rather than as
 settings. `widgets.weather.latitude`/`.longitude` are used only when the dialog
@@ -126,23 +125,6 @@ has not saved a location; a location chosen in the UI wins from then on.
 choice wins on subsequent config reloads. `widgets.crypto.entries` is used only
 when the settings view has not saved a list. Deleting `state.json` returns these
 choices to what the config file says.
-
-The clock's control panel has a **Notification sound** selector directly below
-Do Not Disturb. Choices are **Off** (the default), **Soft bell**, **Soft chime**,
-**Message**, **Instant message**, **Information**, **Volume change**,
-**Device added**, **Device removed** and **Custom**.
-
-For Custom, enter an absolute local file path and click **Apply** or press Enter.
-The file must be readable and regular; unsupported audio formats fail at playback
-without interrupting notifications. Invalid path edits leave the saved preference
-unchanged. Select Off to disable sound; the last custom path remains available
-for reuse. Preferences are saved in `state.json`, not `config.toml`.
-
-Sounds play softly through the system's default output and honor its mute/volume.
-Use short audio clips: playback is bounded to five seconds.
-Do Not Disturb silences even critical notifications. Sender `suppress-sound`
-hints, replacements, restored history, internal reports and arrivals without
-an admitted banner remain silent.
 
 ---
 
