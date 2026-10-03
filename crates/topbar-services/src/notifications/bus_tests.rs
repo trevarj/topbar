@@ -118,6 +118,10 @@ async fn the_daemon_introduces_itself_the_way_the_specification_asks() {
     assert!(capabilities.contains(&"body-markup".to_string()));
     assert!(capabilities.contains(&"persistence".to_string()));
     assert!(!capabilities.contains(&"action-icons".to_string()));
+    assert!(
+        !capabilities.contains(&"sound".to_string()),
+        "no sound-file support"
+    );
 }
 
 #[tokio::test]

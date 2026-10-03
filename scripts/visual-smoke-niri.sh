@@ -354,6 +354,18 @@ if [ -n "${SMOKE_PATH:-}" ]; then
   export PATH
 fi
 
+cleanup() {
+  for child in "${panel_pid:-}" "${bluez_pid:-}" "${nm_pid:-}" "${power_pid:-}" "${pulse_pid:-}"; do
+    if [ -n "$child" ]; then
+      kill "$child" 2>/dev/null || true
+      wait "$child" 2>/dev/null || true
+    fi
+  done
+}
+trap cleanup EXIT
+trap "exit 130" INT
+trap "exit 143" TERM
+
 pulse_pid=""
 if [ -n "$7" ]; then
   # A sound server of this run only: its own runtime path inside the sandbox,
@@ -382,6 +394,11 @@ if [ -n "$7" ]; then
     sleep 0.1
     waited=$((waited + 1))
   done
+  test -S "$PULSE_RUNTIME_PATH/native" || {
+    echo "private PulseAudio socket never became ready" >&2
+    exit 1
+  }
+  pactl info >/dev/null
 fi
 
 power_pid=""
@@ -476,12 +493,8 @@ if [ -n "$4" ]; then
 else
   grim "$3/topbar.png"
 fi
-kill "$panel_pid" 2>/dev/null || true
-wait "$panel_pid" 2>/dev/null || true
-[ -n "$bluez_pid" ] && kill "$bluez_pid" 2>/dev/null
-[ -n "$nm_pid" ] && kill "$nm_pid" 2>/dev/null
-[ -n "$power_pid" ] && kill "$power_pid" 2>/dev/null
-[ -n "$pulse_pid" ] && kill "$pulse_pid" 2>/dev/null
+cleanup
+trap - EXIT
 niri msg action quit --skip-confirmation >/dev/null 2>&1 || true
 ' sh "$binary_abs" "$config_abs" "$artifact_dir_abs" "$driver_abs" "$player_abs" "$sni_abs" \
   "${TOPBAR_SMOKE_PULSE:-}" "$power_abs" "${TOPBAR_SMOKE_POWER:-}" \

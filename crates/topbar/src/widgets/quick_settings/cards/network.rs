@@ -33,6 +33,7 @@ use crate::anim::ripple;
 use crate::style::{classes, icons};
 use crate::surfaces::inline::names;
 use crate::surfaces::popovers;
+use crate::surfaces::search::ChoiceFilter;
 use crate::widgets::quick_settings::{WIDGET_NAME, attempt, attempt_then, set_icon, set_text};
 
 /// Gap between the parts of a row.
@@ -86,6 +87,7 @@ pub struct WifiList {
     header: gtk4::Box,
     scanning: Spinner,
     list: gtk4::Box,
+    filter: Rc<ChoiceFilter>,
     empty: Label,
     rows: RefCell<Vec<Row>>,
     /// What the rows were last built from.
@@ -111,6 +113,7 @@ impl WifiList {
         scanning.set_visible(false);
         header.append(&scanning);
         root.append(&header);
+        let filter = ChoiceFilter::new(&root, "Filter networks");
 
         let list = gtk4::Box::new(Orientation::Vertical, 2);
         root.append(&list);
@@ -130,6 +133,7 @@ impl WifiList {
             header,
             scanning,
             list,
+            filter,
             empty,
             rows: RefCell::new(Vec::new()),
             built: RefCell::new(String::new()),
@@ -174,6 +178,9 @@ impl WifiList {
         self.empty
             .set_visible(state.wifi.enabled && state.wifi.list.is_empty());
         self.password.render(state, self);
+        self.filter.set_visible(state.wifi.enabled);
+        self.filter
+            .pin(state.prompt.as_ref().map(|prompt| prompt.ssid.as_str()));
     }
 
     /// Rebuild every row.
@@ -182,6 +189,7 @@ impl WifiList {
         // out before the rows around it are dropped — GTK asserts otherwise.
         self.password.detach();
 
+        self.filter.clear_rows();
         while let Some(child) = self.list.first_child() {
             self.list.remove(&child);
         }
@@ -247,6 +255,7 @@ impl WifiList {
             }
         });
 
+        self.filter.add(&button, ap.ssid.clone(), None);
         (
             button,
             Row {
@@ -490,6 +499,8 @@ fn reorder(list: &gtk4::Box, child: &gtk4::Box, position: Option<usize>) {
 /// The list of VPN profiles.
 pub struct VpnList {
     root: gtk4::Box,
+    list: gtk4::Box,
+    filter: Rc<ChoiceFilter>,
     /// Each row's spinner and accent mark, beside the profile it belongs to.
     rows: RefCell<Vec<(String, Image, Spinner)>>,
     built: RefCell<String>,
@@ -503,8 +514,13 @@ impl VpnList {
     pub fn new(services: &Services, close_on_connect: bool) -> Rc<Self> {
         let root = gtk4::Box::new(Orientation::Vertical, 2);
         root.add_css_class(classes::QS_DEVICE_LIST);
+        let filter = ChoiceFilter::new(&root, "Filter VPN profiles");
+        let list = gtk4::Box::new(Orientation::Vertical, 2);
+        root.append(&list);
         Rc::new(Self {
             root,
+            list,
+            filter,
             rows: RefCell::new(Vec::new()),
             built: RefCell::new(String::new()),
             close_on_connect,
@@ -534,17 +550,19 @@ impl VpnList {
                 spinner.stop();
             }
         }
+        self.filter.apply();
     }
 
     /// Rebuild every row.
     fn rebuild(self: &Rc<Self>, state: &NetworkState) {
-        while let Some(child) = self.root.first_child() {
-            self.root.remove(&child);
+        self.filter.clear_rows();
+        while let Some(child) = self.list.first_child() {
+            self.list.remove(&child);
         }
         let mut rows = Vec::new();
         for profile in &state.vpn {
             let (row, parts) = self.row(profile);
-            self.root.append(&row);
+            self.list.append(&row);
             rows.push(parts);
         }
         *self.rows.borrow_mut() = rows;
@@ -626,6 +644,8 @@ impl VpnList {
             }
         });
 
+        self.filter
+            .add(&button, format!("{} {}", profile.id, profile.uuid), None);
         (button, (profile.uuid.clone(), mark, spinner))
     }
 }

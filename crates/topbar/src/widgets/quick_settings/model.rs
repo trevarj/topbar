@@ -215,8 +215,10 @@ pub fn scroll_step(configured: u32) -> u32 {
 /// PulseAudio's own flag rather than a name comparison: descriptions are not
 /// unique — two identical headsets are two identical strings — and the default
 /// sink is an identity, not a label.
-pub fn selected_device(devices: &[topbar_services::DeviceView]) -> Option<usize> {
-    devices.iter().position(|device| device.is_default)
+pub fn selected_device<'a>(
+    devices: impl IntoIterator<Item = &'a topbar_services::DeviceView>,
+) -> Option<usize> {
+    devices.into_iter().position(|device| device.is_default)
 }
 
 /// The devices worth offering, in the order they were given.
@@ -225,16 +227,15 @@ pub fn selected_device(devices: &[topbar_services::DeviceView]) -> Option<usize>
 /// audio to a headphone socket with nothing in it is offering silence.
 pub fn choosable_devices(
     devices: &[topbar_services::DeviceView],
-) -> Vec<&topbar_services::DeviceView> {
+) -> impl Iterator<Item = &topbar_services::DeviceView> + Clone {
     devices
         .iter()
         .filter(|device| device.port_available != Some(false))
-        .collect()
 }
 
 /// Whether the output chooser is worth showing at all.
 pub fn wants_chooser(audio: &AudioState) -> bool {
-    choosable_devices(&audio.sinks).len() > 1
+    choosable_devices(&audio.sinks).nth(1).is_some()
 }
 
 #[cfg(test)]
@@ -631,7 +632,6 @@ mod tests {
             device("hdmi", false, None),
         ];
         let offered: Vec<&str> = choosable_devices(&devices)
-            .iter()
             .map(|device| device.id.as_str())
             .collect();
         assert_eq!(

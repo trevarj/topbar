@@ -95,15 +95,18 @@ print(round(float(sys.argv[1]) / scale), round(float(sys.argv[2]) / scale))
 
 # Park the pointer at the top-left corner of the output.
 pointer_home() {
+  # ponytail: niri 26.04/Smithay consumes the first motion after an ended popup
+  # grab; reset again to reach the origin. Remove the duplicate when upstream fixes it.
+  wlrctl pointer move -$POINTER_FAR -$POINTER_FAR || return 1
   wlrctl pointer move -$POINTER_FAR -$POINTER_FAR
 }
 
 # Put the pointer at a logical coordinate, from the corner every time.
 pointer_to() {
-  pointer_home
+  pointer_home || return 1
   # A move of zero is not worth a round trip, and wlrctl treats it as one.
   if [ "$1" -ne 0 ] || [ "$2" -ne 0 ]; then
-    wlrctl pointer move "$1" "$2"
+    wlrctl pointer move "$1" "$2" || return 1
   fi
   sleep "$POINTER_SETTLE"
 }
@@ -111,29 +114,29 @@ pointer_to() {
 # Move there and click. The move comes first because a Wayland button event
 # carries no coordinates: what is clicked is whatever the last motion entered.
 click_at() {
-  pointer_to "$1" "$2"
-  wlrctl pointer click "${3:-left}"
+  pointer_to "$1" "$2" || return 1
+  wlrctl pointer click "${3:-left}" || return 1
   sleep "$POINTER_SETTLE"
 }
 
 # Move there and press. See the note above: the button comes back up when this
 # wlrctl exits, so this is the first half of a click and not a hold.
 press_at() {
-  pointer_to "$1" "$2"
-  wlrctl pointer click "${3:-left}" state:press
+  pointer_to "$1" "$2" || return 1
+  wlrctl pointer click "${3:-left}" state:press || return 1
   sleep "$POINTER_SETTLE"
 }
 
 # Let go of whatever press_at is holding.
 pointer_release() {
-  wlrctl pointer click "${1:-left}" state:release
+  wlrctl pointer click "${1:-left}" state:release || return 1
   sleep "$POINTER_SETTLE"
 }
 
 # Move there and scroll. A positive amount scrolls down.
 scroll_at() {
-  pointer_to "$1" "$2"
-  wlrctl pointer scroll "$3" 0
+  pointer_to "$1" "$2" || return 1
+  wlrctl pointer scroll "$3" 0 || return 1
   sleep "$POINTER_SETTLE"
 }
 
@@ -218,3 +221,176 @@ assert_unmapped() {
   echo "smoke-pointer: $1 is still mapped${2:+ ($2)}" >&2
   return 1
 }
+
+# Read native widget state after real keyboard input. Never set a query through IPC.
+# Standalone choosers publish the same debug dump on key release.
+picker_dump() {
+  picker_log=${PICKER_LOG:-$SMOKE_ARTIFACTS/panel.log}
+  picker_prefix=${PICKER_PREFIX:-ui-dump}
+  picker_before=$(grep -c "$picker_prefix: end" "$picker_log" 2>/dev/null || true)
+  if [ "$picker_prefix" = chooser-dump ]; then
+    wtype -k Shift_L || return 1
+  else
+    "$SMOKE_TOPBAR" popover show surface-dump >/dev/null 2>&1 || return 1
+  fi
+  picker_wait=0
+  while [ "$picker_wait" -lt 100 ]; do
+    picker_after=$(grep -c "$picker_prefix: end" "$picker_log" 2>/dev/null || true)
+    [ "${picker_after:-0}" -gt "${picker_before:-0}" ] && return 0
+    sleep 0.1 || return 1
+    picker_wait=$((picker_wait + 1))
+  done
+  echo "picker dump never completed: $picker_log" >&2
+  return 1
+}
+
+# count, focused, centre or query from the last completed live widget dump.
+# GtkType class... locators match exact types and unordered CSS tokens; an optional
+# " | label" suffix retains label matching. Other locators keep substring matching.
+# Parser-only check: `. scripts/smoke-pointer.sh; picker_read selfcheck ''`.
+picker_read() {
+  python3 - "${PICKER_LOG:-$SMOKE_ARTIFACTS/panel.log}" "${PICKER_PREFIX:-ui-dump}" "$@" <<'PY'
+import re, sys
+path, prefix, mode, pattern = sys.argv[1:5]
+
+def matches(widget_type, classes, label, pattern):
+    selector, separator, label_pattern = pattern.partition(" | ")
+    tokens = selector.split()
+    if tokens and tokens[0].startswith("Gtk"):
+        return (widget_type == tokens[0]
+                and set(tokens[1:]).issubset(classes.split("."))
+                and (not separator or label_pattern in label))
+    return pattern in " ".join((widget_type, classes.replace(".", " "), label))
+
+if mode == "selfcheck":
+    assert matches("GtkButton", "text-button.picker-option", "Off", "GtkButton picker-option")
+    assert matches("GtkBox", "horizontal.crypto-setting-row.picker-option", "", "GtkBox crypto-setting-row picker-option")
+    assert not matches("GtkBox", "picker-option", "", "GtkButton picker-option")
+    assert not matches("GtkButton", "not-picker-option", "picker-option", "GtkButton picker-option")
+    assert matches("GtkLabel", "chooser-empty", "No matching choices", "GtkLabel chooser-empty | No matching choices")
+    assert not matches("GtkLabel", "chooser-empty", "Loading", "GtkLabel chooser-empty | No matching choices")
+    assert matches("GtkSearchEntry", "picker-search", "Temperature unit · fhr", "Temperature unit")
+    sys.exit(0)
+text = re.sub(r"\x1b\[[0-9;]*m", "", open(path, errors="replace").read())
+start = text.rfind(prefix + ": begin")
+end = text.find(prefix + ": end", start)
+assert start >= 0 and end > start, "no completed picker dump"
+rows = []
+for line in text[start:end].splitlines():
+    m = re.search(re.escape(prefix) + r': (\S+) \[([^\]]*)\] "([^"]*)" (-?\d+) (-?\d+) (\d+) (\d+)(.*)', line)
+    if m and matches(m[1], m[2], m[3], pattern):
+        rows.append(m)
+if mode == "count":
+    print(len(rows))
+elif mode == "focused":
+    assert any("focused=true" in row[8] for row in rows), f"no focused {pattern}"
+elif mode == "centre":
+    index = int(sys.argv[5]) if len(sys.argv) > 5 else 1
+    row = rows[index - 1]
+    assert int(row[6]) > 0 and int(row[7]) > 0, "picker not laid out"
+    print(int(row[4]) + int(row[6]) // 2, int(row[5]) + int(row[7]) // 2)
+elif mode == "labels":
+    import json
+    print(json.dumps([row[3] for row in rows]))
+elif mode == "disabled":
+    assert any("sensitive=false" in row[8] for row in rows), f"no disabled {pattern}"
+elif mode == "query":
+    expected = sys.argv[5]
+    assert any(row[3] == pattern + " · " + expected for row in rows), f"{pattern}: expected query {expected!r}"
+PY
+}
+
+picker_focus() (
+  pattern=$1
+  attempts=0
+  while [ "$attempts" -lt 60 ]; do
+    picker_dump || return 1
+    if picker_read focused "$pattern" 2>/dev/null; then return 0; fi
+    key_press Tab || return 1
+    attempts=$((attempts + 1))
+  done
+  echo "could not focus picker option: $pattern" >&2
+  return 1
+)
+
+picker_click() {
+  picker_dump || return 1
+  picker_xy=$(picker_read centre "$1" "${2:-1}") || return 1
+  # shellcheck disable=SC2086
+  click_at $picker_xy
+}
+
+# Probe focus-independent typing, tail Backspace, no-match recovery and clearing.
+# The caller checks its fake-service recorder/state file around this non-activation probe.
+# Callers run probes inside `command || ...`, which disables shell errexit even
+# in these subshells. Each action/assertion must therefore propagate failure.
+picker_probe() (
+  row=$1
+  search=$2
+  query=$3
+  expected=${4:-1}
+  picker_dump || return 1
+  original=$(picker_read count "$row") || return 1
+  [ "$original" -gt 0 ] || return 1
+  picker_focus "$row" || return 1
+  type_text "$query" || return 1
+  picker_dump || return 1
+  picker_read query "$search" "$query" || return 1
+  [ "$(picker_read count "$row")" -eq "$expected" ] || return 1
+  wtype -M shift -k Down -m shift || return 1
+  picker_dump || return 1
+  picker_read focused "$search" || return 1
+  picker_read query "$search" "$query" || return 1
+  picker_focus "$row" || return 1
+  key_press BackSpace || return 1
+  shorter=${query%?}
+  picker_dump || return 1
+  picker_read query "$search" "$shorter" || return 1
+  [ "$(picker_read count "$row")" -ge "$expected" ] || return 1
+  picker_focus "$row" || return 1
+  type_text "zzzzz" || return 1
+  picker_dump || return 1
+  [ "$(picker_read count "$row")" -eq 0 ] || return 1
+  if [ "${PICKER_PREFIX:-ui-dump}" = chooser-dump ]; then
+    picker_read disabled Apply || return 1
+    [ "$(picker_read count 'GtkLabel chooser-empty | No matching choices')" -eq 1 ] || return 1
+  fi
+  for ignored in 1 2 3 4 5; do key_press BackSpace || return 1; done
+  picker_dump || return 1
+  picker_read query "$search" "$shorter" || return 1
+  [ "$(picker_read count "$row")" -ge "$expected" ] || return 1
+  wtype -M ctrl -k a -m ctrl || return 1
+  key_press BackSpace || return 1
+  picker_dump || return 1
+  picker_read query "$search" "" || return 1
+  [ "$(picker_read count "$row")" -eq "$original" ] || return 1
+)
+
+picker_saved() {
+  python3 - "$XDG_STATE_HOME/topbar/state.json" "$1" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+state = json.loads(path.read_text()) if path.exists() else {}
+print(json.dumps(state.get(sys.argv[2]), sort_keys=True))
+PY
+}
+
+picker_tail_probe() (
+  row=$1
+  search=$2
+  query=$3
+  picker_focus "$row" || return 1
+  type_text zzz || return 1
+  picker_dump || return 1
+  picker_read query "$search" "${query}zzz" || return 1
+  [ "$(picker_read count "$row")" -eq 0 ] || return 1
+  for ignored in 1 2 3; do key_press BackSpace || return 1; done
+  picker_focus "$row" || return 1
+  key_press BackSpace || return 1
+  picker_dump || return 1
+  picker_read query "$search" "${query%?}" || return 1
+  wtype -M ctrl -k a -m ctrl || return 1
+  type_text "$query" || return 1
+  picker_dump || return 1
+  picker_read query "$search" "$query" || return 1
+)

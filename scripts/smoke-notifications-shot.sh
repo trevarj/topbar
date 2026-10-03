@@ -216,6 +216,164 @@ populate() {
     "Updates available" "7 packages can be updated"
 }
 
+# Sound checks share the same private bus, state writer and nested geometry.
+# Select through the native GTK popup/keyboard, never through service IPC.
+select_sound() {
+  choice=$1
+  check dump_until "picker-selector"
+  check click_on "picker-selector"
+  case "$choice" in
+    off) query=off ;;
+    soft_bell) query=sbl ;;
+    soft_chime) query=sch ;;
+    message) query=message ;;
+    message_new_instant) query=inst ;;
+    dialog_information) query=info ;;
+    audio_volume_change) query=vol ;;
+    device_added) query=dadded ;;
+    device_removed) query=dremoved ;;
+    custom) query=cstm ;;
+    *) echo "unknown sound choice: $choice" >&2; return 1 ;;
+  esac
+  sound_before=$(sound_selection_state)
+  if [ "$choice" = soft_bell ]; then
+    check picker_probe "GtkButton picker-option" "Notification sound" sbl
+    key_press Escape
+    check test "$(sound_selection_state)" = "$sound_before"
+    check picker_focus "picker-selector"
+    type_text sbl
+    picker_dump
+    check picker_read query "Notification sound" sbl
+    check test "$(sound_selection_state)" = "$sound_before"
+    key_press Escape
+    check dump_until "picker-selector"
+    check click_on "picker-selector"
+    picker_dump
+    check picker_read query "Notification sound" ""
+  fi
+  key_press Down
+  type_text "$query"
+  picker_dump
+  check picker_read query "Notification sound" "$query"
+  check test "$(sound_selection_state)" = "$sound_before"
+  key_press Down
+  key_press Return
+  # Custom is a draft until its path is successfully applied.
+  if [ "$choice" = custom ]; then
+    check dump_until "GtkButton notification-sound-apply"
+    # The nested compositor must present the newly revealed row before input.
+    pointer_park
+    check shot custom-sound-ready topbar-popover
+  else
+    check saved_preference sound "$choice"
+  fi
+  dump
+}
+
+sound_selection_state() {
+  python3 - "$XDG_STATE_HOME/topbar/state.json" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+state = json.loads(path.read_text()).get("notifications", {}) if path.exists() else {}
+print(json.dumps([state.get("sound"), state.get("custom_sound_path")]))
+PY
+}
+
+edit_custom_sound() {
+  check dump_until "GtkEntry notification-sound-path"
+  check click_on "GtkEntry notification-sound-path"
+  wtype -M ctrl -k a -m ctrl
+  type_text "$1"
+  if [ "${2:-enter}" = apply ]; then
+    check click_on "GtkButton notification-sound-apply"
+  else
+    key_press Return
+  fi
+  dump
+}
+
+# Await the shared atomic state writer, not a guessed debounce sleep.
+saved_preference() {
+  python3 - "$XDG_STATE_HOME/topbar/state.json" "$1" "$2" <<'PY'
+import json, pathlib, sys, time
+path, key, wanted = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+expected = {"true": True, "false": False}.get(wanted, wanted)
+deadline = time.monotonic() + 10
+while time.monotonic() < deadline:
+    try:
+        if json.loads(path.read_text())["notifications"][key] == expected:
+            print(f"saved preference: {key}={wanted}")
+            break
+    except (OSError, ValueError, KeyError):
+        pass
+    time.sleep(0.1)
+else:
+    raise SystemExit(f"preference never persisted: {key}={wanted}")
+PY
+}
+
+# Actual PCM from the private sink monitor. No device/server outside this box.
+# Each recording is bounded and every recorder is killed and waited, even on error.
+audio_check() {
+  python3 - "$art" "$@" <<'PY'
+import array, json, os, pathlib, subprocess, sys, time
+art, expected, label = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+command = sys.argv[4:]
+runtime = pathlib.Path(os.environ["XDG_RUNTIME_DIR"])
+assert os.environ.get("PULSE_SERVER") == f"unix:{runtime}/pulse/native", "not private audio"
+assert (runtime / "pulse/native").is_socket(), "private audio socket not ready"
+def pulse(*args):
+    return subprocess.run(["pactl", *args], check=True, capture_output=True,
+                          text=True, timeout=3).stdout
+assert "topbar_smoke.monitor" in pulse("list", "short", "sources"), "no null-sink monitor"
+deadline = time.monotonic() + 8
+while "application.name = \"topbar\"" in pulse("list", "sink-inputs"):
+    if time.monotonic() >= deadline:
+        raise SystemExit("previous notification player did not finish")
+    time.sleep(0.1)
+pcm = art / f"audio-{label}.pcm"
+with pcm.open("wb") as output:
+    recorder = subprocess.Popen([
+        "parec", "--raw", "--format=s16le", "--rate=16000", "--channels=1",
+        "--device=topbar_smoke.monitor",
+        "--property=application.name=topbar-sound-smoke-monitor",
+    ], stdout=output, stderr=subprocess.PIPE)
+    try:
+        deadline = time.monotonic() + 8
+        while pcm.stat().st_size < 3200:
+            if recorder.poll() is not None or time.monotonic() >= deadline:
+                raise SystemExit("private monitor never produced PCM")
+            time.sleep(0.1)
+        baseline = pcm.read_bytes()
+        assert not any(baseline), "null-sink baseline is not silent"
+        result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=10)
+        (art / f"audio-{label}.notify").write_text(result.stdout)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if expected == "signal" and pcm.stat().st_size - len(baseline) >= 3200:
+                if any(pcm.read_bytes()[len(baseline):]):
+                    break
+            time.sleep(0.1)
+    finally:
+        if recorder.poll() is None:
+            recorder.terminate()
+        try:
+            _, stderr = recorder.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            recorder.kill()
+            _, stderr = recorder.communicate()
+        (art / f"audio-{label}.recorder.log").write_bytes(stderr)
+samples = array.array("h")
+data = pcm.read_bytes()[len(baseline):]
+samples.frombytes(data[:len(data) // 2 * 2])
+assert len(samples) >= 1600, "insufficient post-notification monitor PCM"
+peak = max(map(abs, samples), default=0)
+evidence = {"expected": expected, "samples": len(samples), "peak": peak}
+(art / f"audio-{label}.json").write_text(json.dumps(evidence) + "\n")
+print(f"private audio {label}: {evidence}")
+assert (peak > 0) == (expected == "signal"), f"unexpected audio: {label}"
+PY
+}
 echo "=== output: $(pointer_size) ==="
 if [ "$(pointer_size)" != "918 988" ]; then
   echo "smoke-notifications: this run wants the nested output at scale 1.0, where"
@@ -345,7 +503,7 @@ case "$scenario" in
     check shot 06-group-cleared
 
     echo "--- Do Not Disturb, which the bar has to show as well"
-    check click_on GtkSwitch 1
+    check click_on notification-dnd
     dump
     pointer_park
     check shot 07-dnd-on
@@ -361,7 +519,7 @@ case "$scenario" in
     dump
     pointer_park
     check shot 08-dnd-history
-    check click_on GtkSwitch 1
+    check click_on notification-dnd
     dump
 
     echo "--- Clear empties the column, and the header goes with it"
@@ -376,6 +534,127 @@ case "$scenario" in
       echo "smoke-notifications: Clear went with the last notification"
     fi
     close_panel
+    ;;
+
+  sounds)
+    open_panel
+    picker_dump
+    check test "$(picker_read count 'GtkMenuButton picker-selector')" -eq 1
+    check rect_of "Off"
+    close_panel
+    check audio_check silence off notify-send -a SoundSmoke -t 1000 "Off is quiet"
+    check saved_preference sound off
+    open_panel
+    select_sound soft_bell
+    pointer_park
+    check shot 01-soft-bell topbar-popover
+    close_panel
+    check audio_check signal bell notify-send -p -a SoundSmoke -t 1000 "Soft bell"
+    replacement_id=$(cat "$art/audio-bell.notify")
+    check audio_check silence replacement notify-send -r "$replacement_id" -a SoundSmoke -t 1000 "Updated quietly"
+    check audio_check silence suppressed notify-send -a SoundSmoke -t 1000 -h boolean:suppress-sound:true "Sender silenced"
+    open_panel
+    select_sound soft_chime
+    close_panel
+    check audio_check signal chime notify-send -a SoundSmoke -t 1000 "Soft chime"
+    for candidate in message message_new_instant dialog_information audio_volume_change device_added device_removed; do
+      open_panel
+      select_sound "$candidate"
+      close_panel
+      check audio_check signal "$candidate" notify-send -a SoundSmoke -t 1000 "$candidate"
+    done
+    open_panel
+    check click_on notification-dnd
+    check saved_preference dnd true
+    close_panel
+    check audio_check silence dnd-critical notify-send -a SoundSmoke -u critical "Critical but quiet"
+    check assert_mapped topbar-toast "critical still appears during DND"
+    open_panel
+    check click_on notification-dnd
+    check saved_preference dnd false
+    select_sound off
+    close_panel
+    check audio_check silence disabled notify-send -a SoundSmoke -t 1000 "Disabled again"
+    open_panel
+    # Use real theme audio under paths containing spaces and a dash-prefixed basename.
+    custom_dir="$art/custom sounds"
+    check mkdir -p "$custom_dir"
+    custom_first="$custom_dir/-notification sound.oga"
+    custom_changed="$custom_dir/-changed sound.oga"
+    check cp "$TOPBAR_NOTIFICATION_SOUND_DIR/message.oga" "$custom_first"
+    check cp "$TOPBAR_NOTIFICATION_SOUND_DIR/complete.oga" "$custom_changed"
+    check test -s "$custom_first"
+    check test -s "$custom_changed"
+    select_sound custom
+    check saved_preference sound off
+    edit_custom_sound "$custom_first" apply
+    check saved_preference sound custom
+    check saved_preference custom_sound_path "$custom_first"
+    pointer_park
+    check shot 02-custom-sound topbar-popover
+    close_panel
+    check audio_check signal custom notify-send -a SoundSmoke -t 1000 "Custom local sound"
+    open_panel
+    edit_custom_sound "$custom_dir/missing sound.oga"
+    # The edit helper already captured the short-lived error banner.
+    if ! rect_of "Cannot read custom sound" >/dev/null 2>&1; then
+      check dump_until "Cannot read custom sound"
+    fi
+    check saved_preference sound custom
+    check saved_preference custom_sound_path "$custom_first"
+    pointer_park
+    check shot 03-custom-invalid topbar-popover
+    close_panel
+    check audio_check signal custom-invalid-retained notify-send -a SoundSmoke -t 1000 "Invalid edit retained sound"
+    open_panel
+    edit_custom_sound "$custom_changed"
+    check saved_preference sound custom
+    check saved_preference custom_sound_path "$custom_changed"
+    close_panel
+    check audio_check signal custom-changed notify-send -a SoundSmoke -t 1000 "Changed custom path"
+    open_panel
+    select_sound off
+    check saved_preference custom_sound_path "$custom_changed"
+    close_panel
+    check audio_check silence custom-off notify-send -a SoundSmoke -t 1000 "Custom disabled"
+    open_panel
+    select_sound custom
+    check click_on "GtkButton notification-sound-apply"
+    check saved_preference sound custom
+    check saved_preference custom_sound_path "$custom_changed"
+    pointer_park
+    check shot 04-custom-reused topbar-popover
+    check cp "$XDG_STATE_HOME/topbar/state.json" "$art/restart-state.json"
+    close_panel
+    ;;
+
+  sounds-restored)
+    # The outer driver seeds this fresh sandbox from the previous run.
+    open_panel
+    check saved_preference sound custom
+    custom_path=$(python3 - "$XDG_STATE_HOME/topbar/state.json" <<'PY'
+import json, pathlib, sys
+path = json.loads(pathlib.Path(sys.argv[1]).read_text())["notifications"]["custom_sound_path"]
+assert pathlib.Path(path).is_absolute() and pathlib.Path(path).is_file()
+assert pathlib.Path(path).name == "-changed sound.oga" and "custom sounds" in path
+print(path)
+PY
+)
+    check saved_preference custom_sound_path "$custom_path"
+    check dump_until "picker-selector"
+    check test "$(picker_read count 'GtkMenuButton picker-selector')" -eq 1
+    check rect_of "Custom"
+    check rect_of "GtkEntry notification-sound-path"
+    check rect_of "SoundSmoke"
+    pointer_park
+    check shot 01-restored topbar-popover
+    close_panel
+    check audio_check signal restored notify-send -a SoundSmoke -t 1000 "Restored custom sound"
+    open_panel
+    select_sound off
+    check saved_preference custom_sound_path "$custom_path"
+    close_panel
+    check audio_check silence restored-off notify-send -a SoundSmoke -t 1000 "Restored sound disabled"
     ;;
 
   # The banners: arrival, hover-pause, actions, close, the stack, critical.

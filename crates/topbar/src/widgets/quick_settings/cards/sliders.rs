@@ -19,7 +19,7 @@
 //! feedback. Forgetting it puts a capsule under the pointer restating the
 //! number the slider already shows.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk4::prelude::*;
@@ -31,6 +31,7 @@ use crate::anim::ripple;
 use crate::bridge::{self, BindingGuard};
 use crate::style::{classes, icons};
 use crate::surfaces::inline::{self, names};
+use crate::surfaces::search::ChoiceFilter;
 use crate::widgets::expander::{ROW_REVEAL_MS, Section};
 use crate::widgets::quick_settings::model;
 use crate::widgets::quick_settings::{attempt, set_icon};
@@ -137,6 +138,8 @@ pub struct Sliders {
     /// The output chooser's slot.
     chooser_slot: Rc<Section>,
     chooser_list: gtk4::Box,
+    device_filter: Rc<ChoiceFilter>,
+    device_rows: RefCell<Vec<(String, String, Image)>>,
     chooser_button: Button,
     /// The chooser's chevron, held rather than looked up.
     ///
@@ -179,9 +182,12 @@ impl Sliders {
         chooser_button.set_visible(false);
         output.row.append(&chooser_button);
 
+        let chooser_scope = gtk4::Box::new(Orientation::Vertical, 2);
+        chooser_scope.add_css_class(classes::QS_DEVICE_LIST);
+        let device_filter = ChoiceFilter::new(&chooser_scope, "Filter output devices");
         let chooser_list = gtk4::Box::new(Orientation::Vertical, 2);
-        chooser_list.add_css_class(classes::QS_DEVICE_LIST);
-        let chooser_slot = Section::new(&chooser_list);
+        chooser_scope.append(&chooser_list);
+        let chooser_slot = Section::new(&chooser_scope);
 
         let (volume_error, volume_slot) = inline::slot(names::VOLUME);
         let (mic_error, mic_error_slot) = inline::slot(names::MICROPHONE);
@@ -218,6 +224,8 @@ impl Sliders {
             mic,
             chooser_slot,
             chooser_list,
+            device_filter,
+            device_rows: RefCell::new(Vec::new()),
             chooser_button,
             chooser_icon,
             chooser_open: Cell::new(false),
@@ -457,12 +465,30 @@ impl Sliders {
 
     /// Rebuild the output list, marking the one in use.
     fn rebuild_devices(&self, state: &AudioState) {
+        let devices = model::choosable_devices(&state.sinks);
+        let selected = model::selected_device(devices.clone());
+        let rows = self.device_rows.borrow();
+        if self.chooser_list.first_child().is_some()
+            && rows
+                .iter()
+                .map(|(id, description, _)| (id.as_str(), description.as_str()))
+                .eq(devices
+                    .clone()
+                    .map(|device| (device.id.as_str(), device.description.as_str())))
+        {
+            for (index, (_, _, mark)) in rows.iter().enumerate() {
+                mark.set_opacity(if selected == Some(index) { 1.0 } else { 0.0 });
+            }
+            return;
+        }
+        drop(rows);
+        self.device_rows.borrow_mut().clear();
+        self.device_filter.clear_rows();
         while let Some(child) = self.chooser_list.first_child() {
             self.chooser_list.remove(&child);
         }
 
-        let devices = model::choosable_devices(&state.sinks);
-        if devices.is_empty() {
+        if devices.clone().next().is_none() {
             let empty = Label::new(Some("No output devices"));
             empty.add_css_class(classes::QS_HINT);
             empty.set_xalign(0.0);
@@ -470,14 +496,7 @@ impl Sliders {
             return;
         }
 
-        // Worked out once from the filtered list rather than per row: the flag
-        // on each device and the mark on each row have to agree, and asking
-        // twice is how they come to disagree.
-        let owned: Vec<topbar_services::DeviceView> =
-            devices.iter().map(|device| (*device).clone()).collect();
-        let selected = model::selected_device(&owned);
-
-        for (index, device) in devices.into_iter().enumerate() {
+        for (index, device) in devices.enumerate() {
             let row = Button::new();
             row.add_css_class(classes::QS_DEVICE_ROW);
 
@@ -520,6 +539,14 @@ impl Sliders {
                 }
             });
             self.chooser_list.append(&row);
+            self.device_filter
+                .add(&row, device.description.clone(), None);
+            self.device_rows.borrow_mut().push((
+                device.id.clone(),
+                device.description.clone(),
+                mark,
+            ));
         }
+        self.device_filter.apply();
     }
 }

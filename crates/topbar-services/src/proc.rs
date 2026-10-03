@@ -194,10 +194,14 @@ pub async fn capture(spec: &CmdSpec) -> Result<Captured, SvcError> {
             command: spec.label(),
             reason: error.to_string(),
         }),
-        Err(_) => Err(SvcError::Command {
-            command: spec.label(),
-            reason: format!("timed out after {:?}", spec.timeout),
-        }),
+        Err(_) => {
+            // Kill and wait explicitly: a bounded effect leaves no child behind.
+            let _ = child.kill().await;
+            Err(SvcError::Command {
+                command: spec.label(),
+                reason: format!("timed out after {:?}", spec.timeout),
+            })
+        }
     }
 }
 

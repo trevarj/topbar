@@ -22,6 +22,15 @@
       pkgs = nixpkgs.legacyPackages.${system};
       lib = pkgs.lib;
       craneLib = crane.mkLib pkgs;
+      # Keep the upstream attribution and license notices with the pinned sounds.
+      notificationSounds = pkgs.sound-theme-freedesktop.overrideAttrs (old: {
+        postInstall = (old.postInstall or "") + ''
+          install -Dm644 CREDITS "$out/share/doc/sound-theme-freedesktop/CREDITS"
+          for notice in COPYING*; do
+            test ! -f "$notice" || install -Dm644 "$notice" "$out/share/doc/sound-theme-freedesktop/$notice"
+          done
+        '';
+      });
 
       # crane's filter keeps Rust and TOML sources only. Three other things are
       # compiled in with include_str!/include_bytes! and have to survive it: the
@@ -93,10 +102,12 @@
           preFixup = ''
             gappsWrapperArgs+=(
               --prefix XDG_DATA_DIRS : "${pkgs.adwaita-icon-theme}/share:${pkgs.hicolor-icon-theme}/share"
+              --set TOPBAR_NOTIFICATION_SOUND_DIR "${notificationSounds}/share/sounds/freedesktop/stereo"
               --prefix PATH : "${
                 lib.makeBinPath [
                   pkgs.fd
                   pkgs.xdg-terminal-exec
+                  pkgs.pulseaudio
                 ]
               }"
             )
@@ -214,6 +225,7 @@
           wtype
         ];
         RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+        TOPBAR_NOTIFICATION_SOUND_DIR = "${notificationSounds}/share/sounds/freedesktop/stereo";
         shellHook = pre-commit.shellHook;
       };
 

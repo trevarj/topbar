@@ -44,6 +44,7 @@ use topbar_services::{BtDevice, BtState, Services};
 use crate::anim::ripple;
 use crate::style::{classes, icons};
 use crate::surfaces::inline::names;
+use crate::surfaces::search::ChoiceFilter;
 use crate::widgets::quick_settings::{attempt, set_text};
 
 /// Gap between the parts of a row.
@@ -118,6 +119,7 @@ struct Row {
 pub struct BluetoothList {
     root: gtk4::Box,
     list: gtk4::Box,
+    filter: Rc<ChoiceFilter>,
     /// "Available devices", with the scan spinner in it. Re-parented into the
     /// list on a rebuild, between the paired rows and the found ones.
     header: gtk4::Box,
@@ -141,6 +143,7 @@ impl BluetoothList {
     pub fn new(services: &Services) -> Rc<Self> {
         let root = gtk4::Box::new(Orientation::Vertical, 0);
         root.add_css_class(classes::QS_DEVICE_LIST);
+        let filter = ChoiceFilter::new(&root, "Filter Bluetooth devices");
 
         let list = gtk4::Box::new(Orientation::Vertical, 2);
         root.append(&list);
@@ -183,6 +186,7 @@ impl BluetoothList {
         Rc::new(Self {
             root,
             list,
+            filter,
             header,
             scanning,
             searching,
@@ -272,6 +276,9 @@ impl BluetoothList {
                 && !shows_found(state),
         );
         self.pairing.render(state, self);
+        self.filter.set_visible(state.powered);
+        self.filter
+            .pin(state.prompt.as_ref().map(|prompt| prompt.path.as_str()));
     }
 
     /// Rebuild every row.
@@ -282,6 +289,7 @@ impl BluetoothList {
         detach(&self.header);
         detach(&self.searching);
 
+        self.filter.clear_rows();
         while let Some(child) = self.list.first_child() {
             self.list.remove(&child);
         }
@@ -299,6 +307,21 @@ impl BluetoothList {
             }
             let (widget, row) = self.row(device);
             self.list.append(&widget);
+            let address = device
+                .path
+                .rsplit('/')
+                .next()
+                .unwrap_or("")
+                .trim_start_matches("dev_");
+            let mut text = String::with_capacity(device.alias.len() + 1 + address.len());
+            text.push_str(&device.alias);
+            text.push(' ');
+            text.extend(
+                address
+                    .chars()
+                    .map(|character| if character == '_' { ':' } else { character }),
+            );
+            self.filter.add(&widget, text, Some(&device.path));
             rows.push(row);
         }
         if found && !headed {

@@ -10,6 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use gio::glib::translate::ToGlibPtr;
 use gio::prelude::*;
 use tokio::sync::watch;
 
@@ -177,7 +178,7 @@ fn discover() -> Result<Vec<Application>, SvcError> {
                 name: entry.display_name().to_string(),
                 generic_name: generic_name
                     .or_else(|| entry.description().map(|value| value.to_string())),
-                executable: entry.executable().to_string_lossy().into_owned(),
+                executable: desktop_executable(&entry),
                 keywords,
                 aliases,
                 icon: entry
@@ -195,6 +196,21 @@ fn discover() -> Result<Vec<Application>, SvcError> {
     });
     entries.dedup_by(|left, right| left.desktop_id == right.desktop_id);
     Ok(entries)
+}
+
+fn desktop_executable(entry: &gio::AppInfo) -> String {
+    // GIO permits NULL for D-Bus-activated entries without Exec; the binding's
+    // non-optional PathBuf getter panics on that valid absence.
+    // SAFETY: entry is live and GIO owns the returned, possibly NULL, string.
+    let path = unsafe { gio::ffi::g_app_info_get_executable(entry.to_glib_none().0) };
+    if path.is_null() {
+        String::new()
+    } else {
+        // SAFETY: the non-NULL string remains valid while entry is borrowed.
+        unsafe { std::ffi::CStr::from_ptr(path) }
+            .to_string_lossy()
+            .into_owned()
+    }
 }
 
 #[derive(Default)]
@@ -319,6 +335,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+    use gio::glib;
 
     #[test]
     fn application_match_includes_desktop_identity() {
@@ -340,6 +357,25 @@ mod tests {
                 "EditorWindow"
             ]
         );
+    }
+
+    #[test]
+    fn dbus_only_desktop_entries_have_no_executable_without_panicking() {
+        for (exec, expected) in [("", ""), ("Exec=echo hello\n", "echo")] {
+            let key_file = glib::KeyFile::new();
+            key_file
+                .load_from_data(
+                    &format!(
+                        "[Desktop Entry]\nType=Application\nName=Example\nDBusActivatable=true\n{exec}"
+                    ),
+                    glib::KeyFileFlags::NONE,
+                )
+                .expect("desktop entry");
+            let entry = gio_unix::DesktopAppInfo::from_keyfile(&key_file)
+                .expect("valid desktop entry")
+                .upcast::<gio::AppInfo>();
+            assert_eq!(desktop_executable(&entry), expected);
+        }
     }
 
     #[test]

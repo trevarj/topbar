@@ -27,7 +27,7 @@ use topbar_services::{
 use crate::anim::{Animation, AnimationParams, Easing};
 use crate::bridge::{self, BindingGuard};
 use crate::style::{classes, icons};
-use crate::surfaces::modal;
+use crate::surfaces::{modal, search};
 use crate::wayland::blur::BlurAttachment;
 
 const MAX_WIDTH: i32 = 1120;
@@ -556,6 +556,10 @@ impl Launcher {
     }
 
     fn install_handlers(self: &Rc<Self>) {
+        search::install(&self.window, {
+            let entry = self.search.downgrade();
+            move |_| entry.upgrade().map(|entry| entry.upcast())
+        });
         let click = gtk4::GestureClick::new();
         click.set_button(gdk::BUTTON_PRIMARY);
         click.connect_released(|_, _, _, _| dismiss());
@@ -605,22 +609,39 @@ impl Launcher {
             });
         }
         let keys = gtk4::EventControllerKey::new();
-        // Handle navigation and activation before the focused entry consumes
-        // keys such as Return; unhandled typing still reaches the entry.
+        // Dedicated search Up/Down and tile navigation; ordinary editors keep
+        // their caret keys and buttons keep their own activation.
         keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
         keys.connect_key_pressed({
             let launcher = Rc::downgrade(self);
-            move |_, key, _, _| {
+            move |_, key, _, modifiers| {
                 let Some(launcher) = launcher.upgrade() else {
                     return glib::Propagation::Proceed;
                 };
+                if search::nested_focus(&launcher.window) {
+                    return glib::Propagation::Proceed;
+                }
+                if search::shortcut(modifiers) || modifiers.contains(gdk::ModifierType::SHIFT_MASK)
+                {
+                    return glib::Propagation::Proceed;
+                }
+                let in_search = search::focused(&launcher.search);
+                let on_tile = launcher
+                    .navigation_targets
+                    .borrow()
+                    .iter()
+                    .any(|target| search::focused(&target.button));
                 match key {
                     gdk::Key::Escape => dismiss(),
-                    gdk::Key::Down => launcher.move_selection(Direction::Down),
-                    gdk::Key::Up => launcher.move_selection(Direction::Up),
-                    gdk::Key::Right => launcher.move_selection(Direction::Right),
-                    gdk::Key::Left => launcher.move_selection(Direction::Left),
-                    gdk::Key::Return | gdk::Key::KP_Enter => launcher.activate_selected(),
+                    gdk::Key::Down if in_search || on_tile => {
+                        launcher.move_selection(Direction::Down)
+                    }
+                    gdk::Key::Up if in_search || on_tile => launcher.move_selection(Direction::Up),
+                    gdk::Key::Right if on_tile => launcher.move_selection(Direction::Right),
+                    gdk::Key::Left if on_tile => launcher.move_selection(Direction::Left),
+                    gdk::Key::Return | gdk::Key::KP_Enter if in_search => {
+                        launcher.activate_selected()
+                    }
                     _ => return glib::Propagation::Proceed,
                 }
                 glib::Propagation::Stop
@@ -744,11 +765,17 @@ impl Launcher {
     }
 
     fn move_selection(&self, direction: Direction) {
-        let selected_id = self.selected_id.borrow().clone();
-        let Some(selected_id) = selected_id.as_deref() else {
+        let from_search = search::focused(&self.search);
+        let targets = self.navigation_targets.borrow();
+        let remembered = self.selected_id.borrow();
+        let selected_id = targets
+            .iter()
+            .find(|target| search::focused(&target.button))
+            .map(|target| target.id.as_str())
+            .or(remembered.as_deref());
+        let Some(selected_id) = selected_id else {
             return;
         };
-        let targets = self.navigation_targets.borrow();
         let Some(next_id) = spatial_target(
             &targets,
             &self.results.clone().upcast(),
@@ -757,23 +784,25 @@ impl Launcher {
         ) else {
             return;
         };
+        drop(remembered);
         let next = stable_index(&self.items.borrow(), Some(&next_id));
         for target in targets.iter() {
             if target.id == next_id {
                 target.button.add_css_class(classes::LAUNCHER_ITEM_SELECTED);
                 self.scroll_selected_into_view(&target.button);
-            } else if target.id == selected_id {
+            } else {
                 target
                     .button
                     .remove_css_class(classes::LAUNCHER_ITEM_SELECTED);
             }
         }
         self.selected_index.set(next);
-        *self.selected_id.borrow_mut() = Some(next_id);
-        if keyboard_focus_after_navigation() == KeyboardFocus::Search && !self.search.has_focus() {
+        if keyboard_focus_after_navigation() == KeyboardFocus::Search && from_search {
             self.search.grab_focus();
-            self.search.set_position(-1);
+        } else if let Some(target) = targets.iter().find(|target| target.id == next_id) {
+            target.button.grab_focus();
         }
+        *self.selected_id.borrow_mut() = Some(next_id);
     }
 
     fn scroll_selected_into_view(&self, button: &Button) {

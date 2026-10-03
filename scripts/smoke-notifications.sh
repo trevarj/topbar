@@ -22,6 +22,8 @@
 #                critical
 #   3  edges     long names, huge bodies, markup, sixty entries, a replacement
 #                landing in an open group
+#   4  sounds    native choices and private null-sink PCM signal/quiet policy
+#   5  sounds-restored  the saved choice and history in a fresh panel process
 #
 # Screenshots and captured output land in target/visual-smoke/notifications/.
 set -eu
@@ -30,7 +32,7 @@ artifact_root="${1:-target/visual-smoke/notifications}"
 mkdir -p "$artifact_root"
 artifact_root=$(cd "$artifact_root" && pwd)
 
-for tool in magick niri grim cargo timeout dbus-run-session wlrctl notify-send python3; do
+for tool in magick niri grim cargo timeout dbus-run-session wlrctl wtype notify-send python3 paplay parec pactl pulseaudio; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "missing required tool: $tool" >&2
     exit 1
@@ -61,13 +63,28 @@ run() {
   # one is eight pixels of red.
   magick -size 64x64 xc:'#e01b24' "$artifact_root/$scenario/icon.png" 2>/dev/null || true
 
+  state_seed=""
+  if [ "$scenario" = sounds-restored ]; then
+    state_seed="$artifact_root/sounds/restart-state.json"
+    test -s "$state_seed" || {
+      echo "smoke-notifications: run sounds before sounds-restored" >&2
+      status=1
+      return
+    }
+  fi
+  scenario_timeout=400
+  case "$scenario" in
+    sounds) scenario_timeout=900 ;;
+  esac
   echo "smoke-notifications: $scenario"
   RUST_LOG="info,topbar=debug,topbar_services::notifications=debug" \
   SMOKE_NOTIFICATIONS_SCENARIO="$scenario" \
+  TOPBAR_SMOKE_STATE="$state_seed" \
   TOPBAR_SMOKE_SCALE=1.0 \
+  PULSE_LATENCY_MSEC=30 \
   TOPBAR_SMOKE_PULSE=1 \
   TOPBAR_SMOKE_POWER="--active balanced --percent 62 --state 2 --time-to-empty 8100" \
-  TOPBAR_SMOKE_TIMEOUT="${TOPBAR_SMOKE_TIMEOUT:-400}" \
+  TOPBAR_SMOKE_TIMEOUT="${TOPBAR_SMOKE_TIMEOUT:-$scenario_timeout}" \
   TOPBAR_SMOKE_DRIVER="$repo/scripts/smoke-notifications-shot.sh" \
   TOPBAR_VISUAL_CONFIG="$config" \
     "$repo/scripts/visual-smoke-niri.sh" "$artifact_root/$scenario" \
@@ -76,7 +93,7 @@ run() {
   mv "$artifact_root/$scenario/panel.log" "$artifact_root/$scenario-panel.log" 2>/dev/null || true
 }
 
-for scenario in ${SMOKE_NOTIFICATIONS_ONLY:-history banners edges}; do
+for scenario in ${SMOKE_NOTIFICATIONS_ONLY:-history banners edges sounds sounds-restored}; do
   run "$scenario"
 done
 

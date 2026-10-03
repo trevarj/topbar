@@ -33,6 +33,7 @@ pub fn init(verbosity: u8) {
     let filter = EnvFilter::from_default_env().add_directive(level.into());
 
     let _ = fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(filter)
         .with_target(true)
         .with_thread_ids(false)

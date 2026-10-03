@@ -41,6 +41,7 @@ use tracing::debug;
 use crate::anim::{Animation, AnimationParams, Easing, SlideBox, motion_enabled, ripple};
 use crate::bridge::{self, ActionScope, BindingGuard};
 use crate::style::classes;
+use crate::surfaces::search::ChoiceFilter;
 use crate::widgets::app_icon;
 use crate::widgets::rounded_picture::RoundedPicture;
 
@@ -120,6 +121,8 @@ pub struct Card {
     elapsed: Label,
     duration: Label,
     switcher: gtk4::Box,
+    switcher_scope: gtk4::Box,
+    player_filter: Rc<ChoiceFilter>,
     /// The players the switcher is drawn for, so it is only rebuilt when the
     /// set of players actually changes.
     switcher_players: RefCell<Vec<String>>,
@@ -221,14 +224,18 @@ impl Card {
         // leaves less room for the wrapping text.
         let switcher = gtk4::Box::new(Orientation::Horizontal, 6);
         switcher.add_css_class(classes::MEDIA_SWITCHER);
-        switcher.set_valign(Align::Start);
-        switcher.set_halign(Align::End);
-        switcher.set_visible(false);
+        let switcher_scope = gtk4::Box::new(Orientation::Vertical, 2);
+        switcher_scope.set_valign(Align::Start);
+        switcher_scope.set_halign(Align::End);
+        switcher_scope.set_visible(false);
+        let player_filter = ChoiceFilter::new(&switcher_scope, "Filter players");
+        player_filter.search.set_width_request(160);
+        switcher_scope.append(&switcher);
 
         let top = gtk4::Box::new(Orientation::Horizontal, 12);
         top.append(&art_slot);
         top.append(&text);
-        top.append(&switcher);
+        top.append(&switcher_scope);
 
         // --- transport ---------------------------------------------------
         // Its own centred row under the seek bar, where GNOME's date menu puts
@@ -284,6 +291,8 @@ impl Card {
             elapsed,
             duration,
             switcher,
+            switcher_scope,
+            player_filter,
             switcher_players: RefCell::new(Vec::new()),
             active: RefCell::new(None),
             dragging: Rc::new(Cell::new(false)),
@@ -540,10 +549,11 @@ impl Card {
     /// Draw one button per player, unless there is only one player.
     fn render_switcher(self: &Rc<Self>, state: &MediaState) {
         let players: Vec<String> = state.players.iter().map(switcher_key).collect();
-        self.switcher.set_visible(players.len() > 1);
+        self.switcher_scope.set_visible(players.len() > 1);
         if players.len() < 2 {
             self.switcher_players.replace(players);
             clear(&self.switcher);
+            self.player_filter.clear_rows();
             return;
         }
 
@@ -551,10 +561,18 @@ impl Card {
         // not throw away the buttons the user is about to click.
         if *self.switcher_players.borrow() != players {
             clear(&self.switcher);
+            self.player_filter.clear_rows();
             for view in &state.players {
-                self.switcher.append(&self.switcher_button(view));
+                let button = self.switcher_button(view);
+                self.player_filter.add(
+                    &button,
+                    format!("{} {}", view.identity, view.bus_name),
+                    None,
+                );
+                self.switcher.append(&button);
             }
             self.switcher_players.replace(players);
+            self.player_filter.apply();
         }
 
         let active = state.active().map(|view| view.bus_name.as_str());
@@ -580,7 +598,6 @@ impl Card {
         let button = Button::new();
         button.add_css_class(classes::MEDIA_SWITCHER_BUTTON);
         ripple::install(&button);
-        button.set_focus_on_click(false);
         button.set_tooltip_text(Some(&view.identity));
 
         let icon = view
@@ -1044,7 +1061,7 @@ mod tests {
                 assert_eq!(card.slot.width(), RIGHT_WIDTH);
                 assert_eq!(card.root.width(), card_width);
                 assert_eq!((card.art.width(), card.art.height()), (104, 104));
-                assert_eq!(card.switcher.is_visible(), players > 1);
+                assert_eq!(card.switcher_scope.is_visible(), players > 1);
             }
         }
 

@@ -31,6 +31,8 @@ set -eu
 scenario="${SMOKE_QS_POINTER_SCENARIO:-controls}"
 
 fail=0
+profile_monitor=""
+trap 'if [ -n "$profile_monitor" ]; then kill "$profile_monitor" 2>/dev/null || true; wait "$profile_monitor" 2>/dev/null || true; fi' EXIT INT TERM
 # Run a check, remember a failure, and never stop the run: a driver that exits
 # at the first failure photographs nothing after it, and the screenshot of what
 # went wrong is the most useful thing it could have left behind.
@@ -206,6 +208,15 @@ assert_one_expandable() {
   return 1
 }
 
+picker_mutations() {
+  case "$1" in
+    network) destination=org.freedesktop.NetworkManager; object=/io/github/trevarj/topbar/FakeNm1; interface=io.github.trevarj.topbar.FakeNm1 ;;
+    bluetooth) destination=org.bluez; object=/io/github/trevarj/topbar/FakeBluez1; interface=io.github.trevarj.topbar.FakeBluez1 ;;
+  esac
+  gdbus call --session --dest "$destination" --object-path "$object" --method "$interface.Calls" |
+    python3 -c 'import re, sys; print(re.findall(r"ActivateConnection|AddAndActivateConnection|DeactivateConnection|Disconnect|Connect |Pair |Trusted|Adapter1[.]Powered", sys.stdin.read()))'
+}
+
 echo "=== output: $(pointer_size) ==="
 if [ "$(pointer_size)" != "918 988" ]; then
   echo "smoke-qs-pointer: this run wants the nested output at scale 1.0, where a"
@@ -359,6 +370,18 @@ case "$scenario" in
     dump
     pointer_park
     check shot 06-output-list
+    sink_before=$(pactl get-default-sink)
+    check picker_probe "GtkButton qs-device-row" "Filter output devices" hdmi
+    check test "$(pactl get-default-sink)" = "$sink_before"
+    check picker_focus "GtkButton qs-device-row"
+    type_text hdmi
+    pactl set-sink-volume topbar_smoke +1%
+    picker_dump
+    check picker_read query "Filter output devices" hdmi
+    check picker_read focused "Filter output devices"
+    wtype -M ctrl -k a -m ctrl
+    key_press BackSpace
+    dump
     echo "--- and a row in it picks an output"
     check click_on qs-device-row 1
     dump
@@ -390,6 +413,19 @@ case "$scenario" in
     dump
     pointer_park
     check shot 02-wifi-list
+    network_before=$(picker_mutations network)
+    check picker_probe "GtkButton qs-network-row" "Filter networks" uad
+    check picker_focus "GtkButton qs-network-row"
+    type_text uad
+    gdbus call --session --dest org.freedesktop.NetworkManager \
+      --object-path /io/github/trevarj/topbar/FakeNm1 \
+      --method io.github.trevarj.topbar.FakeNm1.SetStrength Usadba 15 >/dev/null
+    picker_dump
+    check picker_read query "Filter networks" uad
+    wtype -M ctrl -k a -m ctrl
+    key_press BackSpace
+    check test "$(picker_mutations network)" = "$network_before"
+    dump
 
     echo "--- hover a network row, then join the open one"
     check hover_on Airport
@@ -405,7 +441,18 @@ case "$scenario" in
     dump
     pointer_park
     check snap 05-password-prompt
+    check picker_click "Filter networks"
+    type_text uad
+    picker_dump
+    check test "$(picker_read count qs-password-entry)" -gt 0
+    check picker_focus qs-password-entry
     type_text "wrong-key-on-purpose"
+    picker_dump
+    check picker_read query "Filter networks" uad
+    check picker_click "Filter networks"
+    wtype -M ctrl -k a -m ctrl
+    key_press BackSpace
+    dump
     check snap 06-password-typed
     echo "--- and Connect sends it, which the fake refuses"
     # By class and position, not by the word on it. `rect_of` matches a
@@ -456,6 +503,18 @@ case "$scenario" in
     check assert_one_expandable
     pointer_park
     check shot 02-bluetooth-list
+    bluetooth_before=$(picker_mutations bluetooth)
+    check picker_probe "GtkBox qs-device-row" "Filter Bluetooth devices" mxm
+    check picker_focus "GtkBox qs-device-row"
+    type_text mxm
+    gdbus call --session --dest org.bluez --object-path /io/github/trevarj/topbar/FakeBluez1 \
+      --method io.github.trevarj.topbar.FakeBluez1.SetBattery mouse 41 >/dev/null
+    picker_dump
+    check picker_read query "Filter Bluetooth devices" mxm
+    wtype -M ctrl -k a -m ctrl
+    key_press BackSpace
+    check test "$(picker_mutations bluetooth)" = "$bluetooth_before"
+    dump
 
     echo "--- a device switch connects"
     check click_on GtkSwitch 1
@@ -474,6 +533,10 @@ case "$scenario" in
     check assert_one_expandable
     pointer_park
     check shot 05-vpn-list
+    vpn_before=$(picker_mutations network)
+    check picker_probe "GtkButton qs-vpn-row" "Filter VPN profiles" wrk
+    check test "$(picker_mutations network)" = "$vpn_before"
+    dump
 
     echo "--- a VPN row switches its tunnel"
     check click_on qs-vpn-row 1
@@ -500,11 +563,47 @@ case "$scenario" in
     check assert_one_expandable
     pointer_park
     check shot 07-power-mode
+    dbus-monitor --session \
+      "type='method_call',interface='org.freedesktop.DBus.Properties',arg0='net.hadess.PowerProfiles'" \
+      "type='method_call',interface='org.freedesktop.DBus.Properties',arg0='org.freedesktop.UPower.PowerProfiles'" \
+      >"$SMOKE_ARTIFACTS/profile-calls.log" 2>"$SMOKE_ARTIFACTS/profile-monitor.stderr" &
+    profile_monitor=$!
+    waited=0
+    while ! grep -q "member=Get" "$SMOKE_ARTIFACTS/profile-calls.log"; do
+      [ "$waited" -lt 100 ] || { echo "private profile monitor never became ready" >&2; exit 1; }
+      gdbus call --session --dest net.hadess.PowerProfiles --object-path /net/hadess/PowerProfiles \
+        --method org.freedesktop.DBus.Properties.Get net.hadess.PowerProfiles ActiveProfile >/dev/null
+      sleep .1
+      waited=$((waited + 1))
+    done
+    writes_before=$(grep -c "member=Set" "$SMOKE_ARTIFACTS/profile-calls.log" || true)
+    profile_before=$(gdbus call --session --dest net.hadess.PowerProfiles \
+      --object-path /net/hadess/PowerProfiles --method org.freedesktop.DBus.Properties.Get \
+      net.hadess.PowerProfiles ActiveProfile)
+    check picker_probe "GtkButton qs-radio-row" "Filter power profiles" psv
+    profile_after=$(gdbus call --session --dest net.hadess.PowerProfiles \
+      --object-path /net/hadess/PowerProfiles --method org.freedesktop.DBus.Properties.Get \
+      net.hadess.PowerProfiles ActiveProfile)
+    check test "$profile_after" = "$profile_before"
+    writes_after=$(grep -c "member=Set" "$SMOKE_ARTIFACTS/profile-calls.log" || true)
+    check test "$writes_after" = "$writes_before"
+    dump
     echo "--- and each radio row picks a profile"
+    check picker_focus "GtkButton qs-radio-row"
+    type_text psv
+    dump
     check click_on qs-radio-row 1
     dump
     pointer_park
     check shot 08-power-saver
+    gdbus call --session --dest net.hadess.PowerProfiles --object-path /net/hadess/PowerProfiles \
+      --method org.freedesktop.DBus.Properties.Get net.hadess.PowerProfiles ActiveProfile \
+      >"$SMOKE_ARTIFACTS/filtered-profile.txt"
+    check grep -q power-saver "$SMOKE_ARTIFACTS/filtered-profile.txt"
+    check picker_click "Filter power profiles"
+    wtype -M ctrl -k a -m ctrl
+    key_press BackSpace
+    dump
     check click_on qs-radio-row 3
     dump
     pointer_park

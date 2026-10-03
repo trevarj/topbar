@@ -20,7 +20,7 @@ use crate::error::SvcError;
 use crate::state_store::StateStore;
 
 use super::model::{
-    Action, CloseReason, GroupView, IconSource, NotifState, NotificationView,
+    Action, CloseReason, GroupView, IconSource, NotifState, NotificationSound, NotificationView,
     PersistedNotification, PersistedNotifications, ToastView, Urgency,
 };
 use super::policy::{self, Admission};
@@ -46,6 +46,8 @@ pub(crate) struct Request {
     pub urgency: Urgency,
     /// Whether it is a banner and nothing more.
     pub transient: bool,
+    /// Whether the sender explicitly silenced this notification.
+    pub suppress_sound: bool,
     /// Where its icon comes from.
     pub icon: IconSource,
     /// Milliseconds the banner asked for: positive, 0, or -1.
@@ -69,6 +71,10 @@ pub(super) enum Command {
     ClearAll,
     /// Turn Do Not Disturb on or off.
     SetDnd(bool),
+    /// Choose the optional notification sound.
+    SetSound(NotificationSound),
+    /// Save a validated custom file and select it atomically.
+    SetCustomSound(String, oneshot::Sender<()>),
     /// The history has been looked at.
     MarkSeen,
     /// Hold a banner's timer while the pointer is over it.
@@ -123,6 +129,11 @@ struct Record {
 pub(super) struct Daemon {
     enabled: bool,
     dnd: bool,
+    sound: NotificationSound,
+    custom_sound_path: Option<String>,
+    /// Record receipt effects in tests without ever opening an audio connection.
+    #[cfg(test)]
+    played_sounds: Vec<NotificationSound>,
     next_id: u32,
     /// Notifications in the history, newest first.
     history: Vec<u32>,
@@ -173,6 +184,10 @@ impl Daemon {
         Self {
             enabled: false,
             dnd: persisted.dnd,
+            sound: persisted.sound,
+            custom_sound_path: persisted.custom_sound_path,
+            #[cfg(test)]
+            played_sounds: Vec::new(),
             // Never hand out an id the last run already used: an application
             // that outlived the panel would otherwise replace a stranger's
             // notification with its own.
@@ -230,6 +245,22 @@ impl Daemon {
                     self.dnd = dnd;
                     self.persist();
                 }
+            }
+            Command::SetSound(sound) => {
+                if self.sound != sound {
+                    self.sound = sound;
+                    self.persist();
+                }
+            }
+            Command::SetCustomSound(path, reply) => {
+                if self.sound != NotificationSound::Custom
+                    || self.custom_sound_path.as_deref() != Some(&path)
+                {
+                    self.sound = NotificationSound::Custom;
+                    self.custom_sound_path = Some(path);
+                    self.persist();
+                }
+                let _ = reply.send(());
             }
             Command::MarkSeen => self.unseen = 0,
             Command::PauseToast(id) => self.set_paused(id, true),
@@ -320,6 +351,17 @@ impl Daemon {
             self.remove_toast(id);
         }
 
+        if policy::sound_allowed(
+            self.sound,
+            self.dnd,
+            request.suppress_sound,
+            request.internal,
+            replacing,
+            self.toasts.iter().any(|toast| toast.id == id),
+        ) {
+            self.play_sound();
+        }
+
         if routing.is_discarded() {
             // Silenced and transient: it was never shown and never recorded,
             // so its sender is told it is gone rather than left waiting.
@@ -332,6 +374,52 @@ impl Daemon {
             self.persist();
         }
         id
+    }
+
+    /// Playback is a receipt effect, not a snapshot/render effect.
+    fn play_sound(&mut self) {
+        #[cfg(test)]
+        self.played_sounds.push(self.sound);
+        #[cfg(not(test))]
+        {
+            let path = if self.sound == NotificationSound::Custom {
+                let Some(path) = self.custom_sound_path.as_deref() else {
+                    warn!("custom notification sound path is missing");
+                    return;
+                };
+                if !std::path::Path::new(path).is_absolute() {
+                    warn!("custom notification sound is not an absolute local path");
+                    return;
+                }
+                std::path::PathBuf::from(path)
+            } else {
+                let Some(filename) = self.sound.filename() else {
+                    return;
+                };
+                let Some(directory) = std::env::var_os("TOPBAR_NOTIFICATION_SOUND_DIR") else {
+                    warn!("notification sound assets are unavailable");
+                    return;
+                };
+                std::path::PathBuf::from(directory).join(filename)
+            };
+            tokio::spawn(async move {
+                let mut spec = crate::proc::CmdSpec::argv([
+                    "paplay".to_string(),
+                    "--volume=16384".to_string(),
+                    "--property=application.name=topbar".to_string(),
+                    "--property=media.role=event".to_string(),
+                    "--".to_string(),
+                    path.to_string_lossy().into_owned(),
+                ])
+                .with_timeout(Duration::from_secs(5));
+                spec.max_output_bytes = 1024;
+                match crate::proc::capture(&spec).await {
+                    Ok(output) if output.ok() => {}
+                    Ok(output) => warn!("notification sound failed: {}", output.stderr.trim()),
+                    Err(error) => warn!("notification sound failed: {error}"),
+                }
+            });
+        }
     }
 
     /// The next free notification id. Never 0, which the protocol reserves.
@@ -553,6 +641,8 @@ impl Daemon {
         let state = NotifState {
             enabled: self.enabled,
             dnd: self.dnd,
+            sound: self.sound,
+            custom_sound_path: self.custom_sound_path.clone(),
             toasts,
             history,
             unseen_count: self.unseen,
@@ -571,6 +661,8 @@ impl Daemon {
     fn persist(&self) {
         let notifications = PersistedNotifications {
             dnd: self.dnd,
+            sound: self.sound,
+            custom_sound_path: self.custom_sound_path.clone(),
             next_id: self.next_id,
             history: self
                 .history
@@ -627,4 +719,158 @@ fn unix_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| i64::try_from(since.as_secs()).unwrap_or(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::notifications::model::NotificationSound::SoftBell;
+
+    fn request() -> Request {
+        Request {
+            app_name: "sound-test".into(),
+            replaces_id: 0,
+            summary: "new".into(),
+            body: String::new(),
+            actions: Vec::new(),
+            urgency: Urgency::Normal,
+            transient: false,
+            suppress_sound: false,
+            icon: IconSource::default(),
+            expire_timeout: 60_000,
+            internal: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn sound_is_once_per_admitted_receipt_and_never_a_history_effect() {
+        let path = std::env::temp_dir()
+            .join(format!("topbar-sound-receipt-{}", std::process::id()))
+            .join("state.json");
+        let (_, store) = StateStore::open_at(path);
+        let (publisher, _state) = watch::channel(Arc::new(NotifState::default()));
+        let mut daemon = Daemon::restore(
+            PersistedNotifications {
+                sound: SoftBell,
+                history: vec![PersistedNotification {
+                    id: 90,
+                    ..PersistedNotification::default()
+                }],
+                ..PersistedNotifications::default()
+            },
+            store,
+            publisher,
+        );
+        assert!(
+            daemon.played_sounds.is_empty(),
+            "restoring must stay silent"
+        );
+        let first = daemon.notify(request()).await;
+        daemon.publish();
+        daemon.apply(Command::MarkSeen).await;
+        daemon
+            .notify(Request {
+                replaces_id: first,
+                ..request()
+            })
+            .await;
+        assert_eq!(
+            daemon.played_sounds,
+            [SoftBell],
+            "no replacement/render replay"
+        );
+        daemon
+            .notify(Request {
+                suppress_sound: true,
+                ..request()
+            })
+            .await;
+        daemon
+            .notify(Request {
+                internal: true,
+                transient: true,
+                ..request()
+            })
+            .await;
+        daemon.notify(request()).await; // Full stack: history only.
+        assert_eq!(
+            daemon.played_sounds,
+            [SoftBell],
+            "quiet and invisible arrivals"
+        );
+        daemon.apply(Command::SetDnd(true)).await;
+        daemon
+            .notify(Request {
+                urgency: Urgency::Critical,
+                ..request()
+            })
+            .await;
+        assert_eq!(daemon.played_sounds, [SoftBell], "critical DND is silent");
+        daemon.apply(Command::SetDnd(false)).await;
+        let ids: Vec<_> = daemon.toasts.iter().map(|toast| toast.id).collect();
+        for id in ids {
+            daemon.dismiss_toast(id, CloseReason::Dismissed).await;
+        }
+        daemon
+            .notify(Request {
+                replaces_id: 4242,
+                transient: true,
+                ..request()
+            })
+            .await;
+        assert_eq!(
+            daemon.played_sounds,
+            [SoftBell, SoftBell],
+            "unknown id is new"
+        );
+        for sound in [
+            NotificationSound::Message,
+            NotificationSound::MessageNewInstant,
+            NotificationSound::DialogInformation,
+            NotificationSound::AudioVolumeChange,
+            NotificationSound::DeviceAdded,
+            NotificationSound::DeviceRemoved,
+            NotificationSound::Custom,
+        ] {
+            for id in daemon
+                .toasts
+                .iter()
+                .map(|toast| toast.id)
+                .collect::<Vec<_>>()
+            {
+                daemon.dismiss_toast(id, CloseReason::Dismissed).await;
+            }
+            let before = daemon.played_sounds.len();
+            if sound == NotificationSound::Custom {
+                let (reply, _answer) = oneshot::channel();
+                daemon
+                    .apply(Command::SetCustomSound(
+                        "/tmp/custom sound.oga".into(),
+                        reply,
+                    ))
+                    .await;
+            } else {
+                daemon.apply(Command::SetSound(sound)).await;
+            }
+            daemon.publish();
+            assert_eq!(
+                daemon.played_sounds.len(),
+                before,
+                "selecting never previews"
+            );
+            daemon.notify(request()).await;
+            assert_eq!(daemon.played_sounds.len(), before + 1);
+            assert_eq!(daemon.played_sounds.last(), Some(&sound));
+        }
+        let before = daemon.played_sounds.len();
+        daemon
+            .apply(Command::SetSound(NotificationSound::Off))
+            .await;
+        daemon.notify(request()).await;
+        assert_eq!(
+            daemon.played_sounds.len(),
+            before,
+            "Off disables custom playback"
+        );
+    }
 }

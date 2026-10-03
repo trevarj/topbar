@@ -10,6 +10,7 @@ set -eu
 
 art="$SMOKE_ARTIFACTS"
 . "$(dirname "$0")/smoke-shot.sh"
+. "$(dirname "$0")/smoke-pointer.sh"
 
 scenario="${SMOKE_TRAY_SCENARIO:-basic}"
 sni="${SMOKE_FAKE_SNI:-}"
@@ -93,7 +94,58 @@ case "$scenario" in
   # (b) and (c): the menu, and a submenu of it.
   menu | submenu)
     start menued --title "Menued Item" --icon-name mail-unread-symbolic --default-menu
+    if [ "$scenario" = menu ]; then
+      dbus-monitor --session "type='method_call',interface='com.canonical.dbusmenu'" \
+        >"$art/menu-events.log" 2>"$art/menu-monitor.stderr" &
+      pids="$pids $!"
+      "$SMOKE_TOPBAR" popover show tray-menu
+      waited=0
+      while ! grep -q "member=GetLayout" "$art/menu-events.log"; do
+        [ "$waited" -lt 100 ] || { echo "private menu monitor never became ready" >&2; exit 1; }
+        gdbus call --session --dest "$(bus_name menued)" --object-path /MenuBar \
+          --method com.canonical.dbusmenu.GetLayout 0 0 '[]' >/dev/null
+        sleep .1
+        waited=$((waited + 1))
+      done
+    fi
     shot tray topbar-popover
+    if [ "$scenario" = menu ]; then
+      picker_dump
+      picker_read disabled "Not Available"
+      before=$(grep -c "member=Event" "$art/menu-events.log" || true)
+      picker_probe "GtkButton tray-menu-row picker-option" "Filter menu choices" awy
+      after=$(grep -c "member=Event" "$art/menu-events.log" || true)
+      [ "$before" -eq "$after" ]
+      picker_focus "GtkButton tray-menu-row picker-option"
+      type_text awy
+      picker_click More
+      picker_dump
+      [ "$(picker_read count picker-search)" -eq 0 ]
+      picker_click tray-menu-back
+      picker_dump
+      picker_read query "Filter menu choices" ""
+      picker_focus "GtkButton tray-menu-row picker-option"
+      type_text awy
+      picker_focus "GtkButton tray-menu-row picker-option"
+      key_press Return
+      assert_unmapped topbar-popover
+      python3 - "$art/menu-events.log" <<'PY'
+import pathlib, re, sys, time
+path = pathlib.Path(sys.argv[1])
+deadline = time.monotonic() + 10
+while time.monotonic() < deadline:
+    if re.search(r'member=Event\s+int32 5\s+string "clicked"', path.read_text()):
+        break
+    time.sleep(.1)
+else:
+    raise SystemExit("filtered Away activation did not send original dbusmenu node 5")
+PY
+      "$SMOKE_TOPBAR" popover show tray-menu
+      assert_mapped topbar-popover
+      picker_dump
+      picker_read query "Filter menu choices" ""
+      shot tray-filter-reopened topbar-popover
+    fi
     ;;
 
   # (d) an item flipping to NeedsAttention: before, and after.

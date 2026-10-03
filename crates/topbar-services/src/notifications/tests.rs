@@ -106,6 +106,7 @@ fn request(app: &str, summary: &str) -> Request {
         actions: Vec::new(),
         urgency: Urgency::Normal,
         transient: false,
+        suppress_sound: false,
         icon: IconSource::default(),
         expire_timeout: 60_000,
         internal: false,
@@ -782,9 +783,14 @@ async fn the_history_is_bounded_and_drops_the_oldest_first() {
 }
 
 #[tokio::test]
-async fn the_history_and_the_do_not_disturb_flag_survive_a_restart() {
+async fn the_history_and_notification_preferences_survive_a_restart() {
     let mut fixture = Fixture::new("persist");
     fixture.handle().set_dnd(true).await.expect("dnd on");
+    fixture
+        .handle()
+        .set_sound(NotificationSound::SoftChime)
+        .await
+        .expect("sound choice");
     for summary in ["older", "newer"] {
         fixture
             .handle()
@@ -804,7 +810,9 @@ async fn the_history_and_the_do_not_disturb_flag_survive_a_restart() {
         .await;
 
     let saved = fixture
-        .settled_on_disk(|saved| saved.history.len() == 2 && saved.dnd)
+        .settled_on_disk(|saved| {
+            saved.history.len() == 2 && saved.dnd && saved.sound == NotificationSound::SoftChime
+        })
         .await;
     assert_eq!(
         saved
@@ -823,6 +831,11 @@ async fn the_history_and_the_do_not_disturb_flag_survive_a_restart() {
         .settle("the restored history", |state| !state.history.is_empty())
         .await;
     assert!(state.dnd, "Do Not Disturb is remembered");
+    assert_eq!(
+        state.sound,
+        NotificationSound::SoftChime,
+        "sound is remembered"
+    );
     assert_eq!(state.history.len(), 1, "and the grouping is rebuilt");
     assert_eq!(state.history[0].app_name, "Fractal");
     assert_eq!(state.history[0].count(), 2);
@@ -835,9 +848,140 @@ async fn the_history_and_the_do_not_disturb_flag_survive_a_restart() {
 }
 
 #[tokio::test]
+async fn custom_sound_is_validated_atomically_and_remembered_while_off() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut fixture = Fixture::new("custom-sound");
+    let directory = fixture.path.parent().expect("parent").join("custom sounds");
+    std::fs::create_dir_all(&directory).expect("sound directory");
+    let first = directory.join("-first sound.oga");
+    let second = directory.join("second sound.wav");
+    // Format support belongs to paplay, not path validation.
+    std::fs::write(&first, b"arbitrary supported audio").expect("first file");
+    std::fs::write(&second, b"another audio file").expect("second file");
+    let first = first.to_str().expect("path").to_string();
+    let second = second.to_str().expect("path").to_string();
+    fixture
+        .handle()
+        .set_custom_sound(first.clone())
+        .await
+        .expect("custom sound");
+    fixture
+        .settle("custom selection and path", |state| {
+            state.sound == NotificationSound::Custom
+                && state.custom_sound_path.as_deref() == Some(first.as_str())
+        })
+        .await;
+    fixture
+        .handle()
+        .set_custom_sound(second.clone())
+        .await
+        .expect("change path");
+    fixture
+        .settle("changed custom path", |state| {
+            state.custom_sound_path.as_deref() == Some(second.as_str())
+        })
+        .await;
+    let saved = fixture
+        .settled_on_disk(|saved| {
+            saved.sound == NotificationSound::Custom
+                && saved.custom_sound_path.as_deref() == Some(second.as_str())
+        })
+        .await;
+    let mut restarted = Fixture::restoring("custom-restored", saved.clone());
+    let restored = restarted
+        .settle("restored custom selection", |state| {
+            state.sound == NotificationSound::Custom
+        })
+        .await;
+    assert_eq!(restored.custom_sound_path.as_deref(), Some(second.as_str()));
+
+    let fifo = directory.join("not audio.fifo");
+    let fifo_c = std::ffi::CString::new(fifo.to_str().expect("path")).expect("C path");
+    // SAFETY: a NUL-terminated pathname and ordinary user-only permissions.
+    assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+    let mut invalid = vec![
+        String::new(),
+        "relative.oga".into(),
+        "-option.oga".into(),
+        "file:///tmp/sound.oga".into(),
+        "https://example.org/sound.oga".into(),
+        directory.to_str().expect("path").into(),
+        directory.join("missing.oga").to_str().expect("path").into(),
+        fifo.to_str().expect("path").into(),
+    ];
+    let unreadable = directory.join("unreadable.oga");
+    std::fs::write(&unreadable, b"audio").expect("unreadable fixture");
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o0))
+        .expect("permissions");
+    // SAFETY: geteuid takes no arguments and has no preconditions.
+    if unsafe { libc::geteuid() } != 0 {
+        invalid.push(unreadable.to_str().expect("path").into());
+    }
+    for path in invalid {
+        let outcome = tokio::time::timeout(PATIENCE, fixture.handle().set_custom_sound(path))
+            .await
+            .expect("non-regular files must not block a validation worker");
+        assert!(matches!(outcome, Err(SvcError::Rejected(_))));
+        assert_eq!(fixture.now().sound, NotificationSound::Custom);
+        assert_eq!(
+            fixture.now().custom_sound_path.as_deref(),
+            Some(second.as_str())
+        );
+    }
+    assert!(
+        fixture
+            .handle()
+            .set_sound(NotificationSound::Custom)
+            .await
+            .is_err()
+    );
+    let still_saved = fixture
+        .settled_on_disk(|current| current.sound == NotificationSound::Custom)
+        .await;
+    assert_eq!(
+        still_saved, saved,
+        "invalid edits must leave the persisted preference alone"
+    );
+
+    fixture
+        .handle()
+        .set_sound(NotificationSound::Off)
+        .await
+        .expect("off");
+    let off = fixture
+        .settle("off", |state| state.sound == NotificationSound::Off)
+        .await;
+    assert_eq!(off.custom_sound_path.as_deref(), Some(second.as_str()));
+    let saved_off = fixture
+        .settled_on_disk(|saved| saved.sound == NotificationSound::Off)
+        .await;
+    let mut restarted = Fixture::restoring("custom-off-restored", saved_off);
+    let state = restarted
+        .settle("retained path while off", |state| {
+            state.custom_sound_path.is_some()
+        })
+        .await;
+    assert_eq!(state.sound, NotificationSound::Off);
+    assert_eq!(state.custom_sound_path.as_deref(), Some(second.as_str()));
+    restarted
+        .handle()
+        .set_custom_sound(second.clone())
+        .await
+        .expect("reuse path");
+    restarted
+        .settle("custom reused", |state| {
+            state.sound == NotificationSound::Custom
+        })
+        .await;
+}
+
+#[tokio::test]
 async fn a_restart_never_reuses_a_live_notification_id() {
     let persisted = PersistedNotifications {
         dnd: false,
+        sound: NotificationSound::Off,
+        custom_sound_path: None,
         next_id: 1,
         history: vec![PersistedNotification {
             id: 90,

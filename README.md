@@ -19,9 +19,9 @@ weather forecast.
 - **workspaces** — GNOME Activities-style dots with an animated active pill,
   filtered to the monitor they are on. Urgent workspaces pulse.
 - **clock** — any `strftime` format, aligned to the boundary, with the date
-  menu behind it: notification history with grouping and Do Not Disturb, a
-  calendar, world clocks, MPRIS media controls and a five-day forecast. A dot
-  beside the time says the history holds something you have not opened yet.
+  menu behind it: notification history with grouping, Do Not Disturb and optional
+  configurable notification sounds, a calendar, world clocks, MPRIS media controls
+  and a five-day forecast. A dot beside the time marks unseen notification history.
 - **weather** — Open-Meteo current conditions and forecast, with a location
   search dialog. One cache for the whole panel.
 - **crypto** — bitcoin, ethereum and monero prices from CoinGecko, singly or as
@@ -117,6 +117,12 @@ expand `%k` (the desktop-file path); ordinary desktop entries retain `%k`.
 The volume and brightness commands act on PulseAudio and logind **directly**
 and only then try to raise an OSD, so a media key still works when the panel is
 not running and when the configuration is broken.
+
+Pickers support fuzzy filtering while a choice has focus: type to continue the
+query, or press Backspace to remove its final character. Clearing the query
+restores the choices. Ordinary text editors keep their caret and shortcuts;
+Space still activates focused buttons. Searching a selector never applies a
+value until you activate an option.
 
 `topbar choose --layout wallpapers --wallpaper-provider PROGRAM` accepts
 `{"pool":[...],"presets":[{"id":"nature","label":"Nature"}]}` on stdin. Local

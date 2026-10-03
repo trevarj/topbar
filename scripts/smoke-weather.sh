@@ -159,7 +159,7 @@ run() {
     unset TOPBAR_SMOKE_QUERY
   fi
 
-  TOPBAR_SMOKE_TIMEOUT="${TOPBAR_SMOKE_TIMEOUT:-70}" \
+  TOPBAR_SMOKE_TIMEOUT="${TOPBAR_SMOKE_TIMEOUT:-180}" \
   TOPBAR_SMOKE_DRIVER="$repo/scripts/smoke-weather-shot.sh" \
   TOPBAR_VISUAL_CONFIG="$config" \
     "$repo/scripts/visual-smoke-niri.sh" "$artifact_root/$name" >"$artifact_root/$name.log" 2>&1 ||

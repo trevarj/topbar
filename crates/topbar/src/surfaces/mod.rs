@@ -12,5 +12,6 @@ pub mod modal;
 pub mod osd;
 pub mod osd_bar;
 pub mod popovers;
+pub mod search;
 pub mod toast;
 pub mod tooltip;

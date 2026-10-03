@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::model::{GroupView, NotificationView, Urgency};
+use super::model::{GroupView, NotificationSound, NotificationView, Urgency};
 
 /// How many toasts may be on screen at once.
 pub const MAX_TOASTS: usize = 3;
@@ -57,6 +57,18 @@ pub fn route(urgency: Urgency, transient: bool, dnd: bool, internal: bool) -> Ro
         toast: internal || urgency.is_critical() || !dnd,
         history: !transient && !internal,
     }
+}
+
+/// Only newly admitted external banners may sound. DND silences even critical ones.
+pub fn sound_allowed(
+    sound: NotificationSound,
+    dnd: bool,
+    suppressed: bool,
+    internal: bool,
+    replacing: bool,
+    admitted: bool,
+) -> bool {
+    sound != NotificationSound::Off && !dnd && !suppressed && !internal && !replacing && admitted
 }
 
 /// How long a toast lives, or `None` when it must be dismissed by hand.
@@ -181,6 +193,37 @@ mod tests {
 
     fn entry(id: u32, app: &str) -> (String, Arc<NotificationView>) {
         (group_key(app, None), view(id, app))
+    }
+
+    #[test]
+    fn sound_requires_a_new_admitted_external_banner_and_no_quiet_request() {
+        use NotificationSound::*;
+        for sound in [
+            Off,
+            SoftBell,
+            SoftChime,
+            Message,
+            MessageNewInstant,
+            DialogInformation,
+            AudioVolumeChange,
+            DeviceAdded,
+            DeviceRemoved,
+            Custom,
+        ] {
+            for (dnd, suppressed, internal, replacing, admitted, allowed) in [
+                (false, false, false, false, true, true),
+                (true, false, false, false, true, false),
+                (false, true, false, false, true, false),
+                (false, false, true, false, true, false),
+                (false, false, false, true, true, false),
+                (false, false, false, false, false, false),
+            ] {
+                assert_eq!(
+                    sound_allowed(sound, dnd, suppressed, internal, replacing, admitted),
+                    allowed && sound != Off
+                );
+            }
+        }
     }
 
     #[test]

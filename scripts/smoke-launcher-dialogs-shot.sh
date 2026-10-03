@@ -770,7 +770,7 @@ wait_for_marker() {
   description=$2
   waited=0
   while [ "$waited" -lt 20 ]; do
-    if [ -s "$marker" ]; then
+    if [ -s "$marker" ] || { [ "${3:-}" = exists ] && [ -e "$marker" ]; }; then
       echo "$description observed after ${waited}s"
       return 0
     fi
@@ -972,6 +972,7 @@ key_press Return
 check assert_unmapped topbar-launcher "default selection launches first frequent application"
 check wait_for_exec "editor: from-niri-child"
 check show_launcher
+check picker_probe "GtkButton launcher-item" "Search applications, actions, windows, and files" "SmkEdtr"
 type_text "Smoke Editor"
 check shot launcher-applications topbar-launcher
 key_press Escape
@@ -1082,7 +1083,7 @@ check assert_unmapped topbar-launcher "Terminal entry launches"
 check wait_for_marker "$terminal_log" "terminal helper"
 
 echo "--- launcher DBusActivatable uses Exec, not Activate"
-python3 "$dbus_helper" >"$art/dbus-service.stdout" 2>"$art/dbus-service.stderr" &
+python3 "$SMOKE_LAUNCHER_DBUS_HELPER" >"$art/dbus-service.stdout" 2>"$art/dbus-service.stderr" &
 dbus_pid=$!
 check wait_for_dbus_name
 check show_launcher
@@ -1158,6 +1159,7 @@ else
   check show_launcher
   type_text "Demo"
   check shot launcher-windows topbar-launcher
+  check picker_tail_probe "GtkButton launcher-item" "Search applications, actions, windows, and files" Demo
   key_press Escape
   check assert_unmapped topbar-launcher "Escape closes window search"
 fi
@@ -1171,6 +1173,7 @@ else
   check show_launcher
   type_text "smoke-document"
   check shot launcher-files topbar-launcher
+  check picker_tail_probe "GtkButton launcher-file-row" "Search applications, actions, windows, and files" smoke-document
   key_press Escape
   check assert_unmapped topbar-launcher "Escape closes file search"
 fi
@@ -1178,6 +1181,7 @@ fi
 check show_launcher
 type_text "theme"
 check shot launcher-actions topbar-launcher
+check picker_tail_probe "GtkButton launcher-item" "Search applications, actions, windows, and files" theme
 # The launcher backdrop is deliberately clickable.  This click is below the
 # centered content at every supported nested output size.
 if ! backdrop_click_y=$(backdrop_y); then
@@ -1201,6 +1205,8 @@ check show_launcher
 chooser_pid=$!
 check assert_unmapped topbar-launcher "standalone chooser dismisses launcher"
 check shot chooser-modal-handoff topbar-chooser
+PICKER_LOG="$art/chooser-handoff-first.stderr" PICKER_PREFIX=chooser-dump \
+  check picker_probe "GtkButton chooser-result" Search dwn
 "$SMOKE_TOPBAR" --config "$SMOKE_CONFIG" choose --layout list \
   --title "Second queued chooser" <"$theme_json" \
   >"$art/chooser-handoff-second.result" 2>"$art/chooser-handoff-second.stderr" &
@@ -1255,10 +1261,10 @@ key_press Down
 key_press Down
 check shot chooser-themes-scrolled topbar-chooser
 check assert_theme_results_scrolled
-# Home returns focus to the first result; Shift+Tab returns it to Search so
-# typing still filters rather than going to the focused theme button.
+# Home puts focus on a real row: typing must not require returning to Search.
 key_press Home
-wtype -M shift -k Tab -m shift
+PICKER_LOG="$art/themes-dark.stderr" PICKER_PREFIX=chooser-dump \
+  check picker_probe "GtkButton chooser-result" Search dwn
 type_text "dawn"
 check shot chooser-themes-filtered topbar-chooser
 key_press Return
@@ -1279,6 +1285,33 @@ finish_chooser_cancelled themes-light
 echo "--- standalone wallpaper chooser and decode failure"
 check start_chooser wallpapers "$SMOKE_CONFIG" wallpapers valid "$wallpaper_json"
 check shot chooser-wallpapers-valid topbar-chooser
+key_press Down
+PICKER_LOG="$art/wallpapers.stderr" PICKER_PREFIX=chooser-dump \
+  check picker_probe "GtkButton chooser-result" Search vld
+PICKER_LOG="$art/wallpapers.stderr" PICKER_PREFIX=chooser-dump \
+  check picker_focus "GtkButton chooser-result"
+key_press space
+PICKER_LOG="$art/wallpapers.stderr" PICKER_PREFIX=chooser-dump picker_dump
+PICKER_LOG="$art/wallpapers.stderr" PICKER_PREFIX=chooser-dump check picker_read query Search ""
+# Real compose key presses, not wtype injecting a precomposed Unicode string.
+wtype -k Multi_key -k apostrophe -k e
+PICKER_LOG="$art/wallpapers.stderr" PICKER_PREFIX=chooser-dump picker_dump
+PICKER_LOG="$art/wallpapers.stderr" PICKER_PREFIX=chooser-dump check picker_read query Search "é"
+key_press BackSpace
+PICKER_LOG="$art/wallpapers.stderr" PICKER_PREFIX=chooser-dump picker_dump
+PICKER_LOG="$art/wallpapers.stderr" PICKER_PREFIX=chooser-dump check picker_read query Search ""
+# The first row is pointer-focusable too, without committing a wallpaper.
+PICKER_LOG="$art/wallpapers.stderr" PICKER_PREFIX=chooser-dump \
+  check picker_click "GtkButton chooser-result" 1
+type_text "vld"
+PICKER_LOG="$art/wallpapers.stderr" PICKER_PREFIX=chooser-dump picker_dump
+PICKER_LOG="$art/wallpapers.stderr" PICKER_PREFIX=chooser-dump check picker_read query Search vld
+key_press Down
+key_press BackSpace
+PICKER_LOG="$art/wallpapers.stderr" PICKER_PREFIX=chooser-dump picker_dump
+PICKER_LOG="$art/wallpapers.stderr" PICKER_PREFIX=chooser-dump check picker_read query Search vl
+wtype -M ctrl -k a -m ctrl
+key_press BackSpace
 # The fixture contains six wallpapers.  Moving to the sixth proves the fixed
 # four-row viewport scrolls instead of clipping the lower choices; the shot
 # leaves a visual artifact that also shows the permanent scrollbar.
@@ -1399,12 +1432,18 @@ if wait_for_marker "$SMOKE_WALLPAPER_GATE/search.ready" "Wallhaven search gate";
   fi
   operator_query='+nature -people @someone type:png like:9d82vk & café'
   type_text "$operator_query"
+  key_press Home
+  key_press Right
+  key_press End
+  wtype -M ctrl -k a -m ctrl
+  key_press BackSpace
+  type_text "$operator_query"
   if [ -e "$SMOKE_WALLPAPER_GATE/query.ready" ] || [ -e "$SMOKE_WALLPAPER_GATE/save.ready" ]; then
     echo "editing the API query searched or saved without submission" >&2
     fail=1
   fi
   key_press Return
-  if wait_for_marker "$SMOKE_WALLPAPER_GATE/query.ready" "submitted Wallhaven query"; then
+  if wait_for_marker "$SMOKE_WALLPAPER_GATE/query.ready" "submitted Wallhaven query" exists; then
     if [ "$(cat "$SMOKE_WALLPAPER_GATE/query.value")" != "$operator_query" ]; then
       echo "Wallhaven query operators were not forwarded unchanged" >&2
       fail=1
@@ -1416,12 +1455,17 @@ if wait_for_marker "$SMOKE_WALLPAPER_GATE/search.ready" "Wallhaven search gate";
     check assert_mapped topbar-chooser "query Enter leaves chooser mapped"
     touch "$SMOKE_WALLPAPER_GATE/query.release"
     check shot wallpaper-tabs-query-results topbar-chooser
-    # Query -> Search button -> Filter results. Only the second row has this
-    # fuzzy tag alias; neither label nor stable ID contains the subsequence.
-    key_press Tab
+    # Focus a loaded result; typing routes to Filter, never the API query.
+    PICKER_LOG="$art/wallpaper-tabs.stderr" PICKER_PREFIX=chooser-dump \
+      check picker_probe "GtkButton chooser-result" "Filter results" stcl
     key_press Tab
     type_text "stcl"
     check shot wallpaper-tabs-tag-filtered topbar-chooser
+    key_press Down
+    key_press BackSpace
+    PICKER_LOG="$art/wallpaper-tabs.stderr" PICKER_PREFIX=chooser-dump picker_dump
+    PICKER_LOG="$art/wallpaper-tabs.stderr" PICKER_PREFIX=chooser-dump \
+      check picker_read query "Filter results" stc
     wtype -M ctrl -k a -m ctrl
     key_press BackSpace
     check shot wallpaper-tabs-filter-cleared topbar-chooser

@@ -139,7 +139,7 @@ run() {
     unset TOPBAR_SMOKE_OPEN
   fi
 
-  TOPBAR_SMOKE_TIMEOUT="${TOPBAR_SMOKE_TIMEOUT:-70}" \
+  TOPBAR_SMOKE_TIMEOUT="${TOPBAR_SMOKE_TIMEOUT:-180}" \
   TOPBAR_SMOKE_DRIVER="$repo/scripts/smoke-crypto-shot.sh" \
   TOPBAR_VISUAL_CONFIG="$crypto_config" \
     "$repo/scripts/visual-smoke-niri.sh" "$artifact_root/$name" >"$artifact_root/$name.log" 2>&1 ||

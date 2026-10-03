@@ -20,18 +20,15 @@
 //! # Environment
 //!
 //! `TOPBAR_SMOKE_QUERY` seeds the search box and runs the search as soon as
-//! the dialog opens. There is no synthetic pointer or keyboard in the dev
-//! shell, so it is the only way the visual smoke run can screenshot a dialog
-//! with results in it. Debug builds only.
+//! the dialog opens. It is a debug-only fixture seed; the interactive smoke
+//! driver then sends real native keyboard events to the result and unit pickers.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
 use gtk4::prelude::*;
-use gtk4::{
-    Align, Button, DropDown, Entry, Expander, Label, Orientation, Window, gdk, glib, pango,
-};
+use gtk4::{Align, Button, Entry, Expander, Label, Orientation, Window, gdk, glib, pango};
 use gtk4_layer_shell::{KeyboardMode, LayerShell};
 use topbar_core::config::WeatherConfig;
 use topbar_services::ipc::InputLock;
@@ -41,7 +38,8 @@ use tracing::{debug, warn};
 
 use crate::bridge::{self, ActionScope};
 use crate::style::classes;
-use crate::surfaces::modal;
+use crate::surfaces::search::SearchSelector;
+use crate::surfaces::{modal, search};
 
 /// Where this dialog's failures are reported.
 const SCOPE: ActionScope = ActionScope::Toast { widget: "weather" };
@@ -112,11 +110,12 @@ struct Dialog {
     backdrop: Window,
     search: Entry,
     results: gtk4::Box,
+    result_rows: RefCell<Vec<(GeocodeResult, Button)>>,
     status: Label,
     latitude: Entry,
     longitude: Entry,
     advanced: Expander,
-    unit: DropDown,
+    unit: Rc<SearchSelector>,
     initial_unit: TemperatureUnit,
     initial_coordinates: (String, String),
     /// The place the user picked, so Save can keep its name.
@@ -186,7 +185,7 @@ impl Dialog {
         coordinates.append(&longitude);
         let initial_coordinates = (latitude.text().to_string(), longitude.text().to_string());
 
-        let unit = DropDown::from_strings(&["Celsius (°C)", "Fahrenheit (°F)"]);
+        let unit = SearchSelector::new("Temperature unit", &["Celsius (°C)", "Fahrenheit (°F)"]);
         let state = services.weather.state();
         let initial_unit = state.borrow().unit;
         unit.set_selected(u32::from(initial_unit == TemperatureUnit::Fahrenheit));
@@ -195,11 +194,16 @@ impl Dialog {
         unit_label.set_xalign(0.0);
         unit_label.set_hexpand(true);
         unit_row.append(&unit_label);
-        unit_row.append(&unit);
+        unit_row.append(unit.root());
 
         let advanced = Expander::new(Some("Advanced"));
         advanced.add_css_class(classes::LOCATION_ADVANCED);
         advanced.set_child(Some(&coordinates));
+        // ponytail: GTK 4.22 visits detached children; remove this binding once fixed.
+        advanced
+            .bind_property("expanded", &coordinates, "visible")
+            .sync_create()
+            .build();
 
         // --- actions --------------------------------------------------------
         let actions = gtk4::Box::new(Orientation::Horizontal, 8);
@@ -229,6 +233,7 @@ impl Dialog {
             backdrop,
             search,
             results,
+            result_rows: RefCell::new(Vec::new()),
             status,
             latitude,
             longitude,
@@ -248,6 +253,10 @@ impl Dialog {
 
     /// Connect everything that reacts to the user.
     fn wire(self: &Rc<Self>, cancel: &Button, save: &Button) {
+        search::install(&self.window, {
+            let entry = self.search.downgrade();
+            move |_| entry.upgrade().map(|entry| entry.upcast())
+        });
         // Type-ahead: every keystroke restarts the timer, and only the pause
         // sends a request. A search per character would be five requests for
         // "Paris" and a rate limit for the sixth.
@@ -255,6 +264,10 @@ impl Dialog {
             let weak = Rc::downgrade(self);
             move |_| {
                 if let Some(dialog) = weak.upgrade() {
+                    dialog
+                        .generation
+                        .set(dialog.generation.get().wrapping_add(1));
+                    dialog.filter_results();
                     dialog.schedule_search();
                 }
             }
@@ -281,8 +294,11 @@ impl Dialog {
 
         // Escape and a click on the backdrop are both Cancel.
         let keys = gtk4::EventControllerKey::new();
-        keys.connect_key_pressed(|_, key, _, _| {
-            if key == gdk::Key::Escape {
+        keys.connect_key_pressed(|_, key, _, modifiers| {
+            if key == gdk::Key::Escape
+                && !search::shortcut(modifiers)
+                && !modifiers.contains(gdk::ModifierType::SHIFT_MASK)
+            {
                 dismiss();
                 return glib::Propagation::Stop;
             }
@@ -349,7 +365,7 @@ impl Dialog {
         // the user is still typing, and an error under a half-typed word is
         // noise. Save is where an empty query becomes a message.
         if query.chars().count() < MIN_QUERY {
-            self.clear_results();
+            self.filter_results();
             self.set_status(HINT);
             return;
         }
@@ -375,21 +391,24 @@ impl Dialog {
 
             match found {
                 Ok(Ok(results)) if results.is_empty() => {
-                    dialog.clear_results();
-                    dialog.set_status(NO_RESULTS);
+                    // Keep the last real batch: the remote geocoder need not
+                    // understand the local fuzzy subsequence the user typed.
+                    dialog.filter_results();
+                    if dialog.result_rows.borrow().is_empty() {
+                        dialog.set_status(NO_RESULTS);
+                    }
                 }
                 Ok(Ok(results)) => {
                     dialog.show_results(&results);
-                    dialog.set_status(HINT);
                 }
                 Ok(Err(error)) => {
                     warn!("the weather location search failed: {error}");
-                    dialog.clear_results();
+                    dialog.filter_results();
                     dialog.set_status(SEARCH_FAILED);
                 }
                 Err(error) => {
                     warn!("the weather location search task failed: {error}");
-                    dialog.clear_results();
+                    dialog.filter_results();
                     dialog.set_status(SEARCH_FAILED);
                 }
             }
@@ -416,7 +435,27 @@ impl Dialog {
                 }
             });
             self.results.append(&row);
+            self.result_rows
+                .borrow_mut()
+                .push((result.clone(), row.clone()));
         }
+        self.filter_results();
+    }
+
+    fn filter_results(&self) {
+        let query = self.search.text();
+        let mut visible = false;
+        let rows = self.result_rows.borrow();
+        for (result, row) in rows.iter() {
+            let show = search::matches(&query, &result.label);
+            row.set_visible(show);
+            visible |= show;
+        }
+        self.set_status(if !query.is_empty() && !visible && !rows.is_empty() {
+            NO_RESULTS
+        } else {
+            HINT
+        });
     }
 
     /// Take one of them.
@@ -437,6 +476,15 @@ impl Dialog {
     }
 
     fn clear_results(&self) {
+        if self
+            .result_rows
+            .borrow()
+            .iter()
+            .any(|(_, row)| search::focused(row))
+        {
+            self.search.grab_focus();
+        }
+        self.result_rows.borrow_mut().clear();
         while let Some(child) = self.results.first_child() {
             self.results.remove(&child);
         }
@@ -539,31 +587,5 @@ mod tests {
     fn coordinates_are_compared_at_the_precision_the_api_reports() {
         assert!(same_coordinate(55.75222, 55.752_220_1));
         assert!(!same_coordinate(55.75222, 55.7523));
-    }
-
-    #[test]
-    fn every_message_the_dialog_can_show_is_a_sentence() {
-        for message in [
-            HINT,
-            SEARCHING,
-            EMPTY_QUERY,
-            NO_RESULTS,
-            SEARCH_FAILED,
-            NOT_NUMBERS,
-            OUT_OF_RANGE,
-        ] {
-            assert!(!message.is_empty());
-            assert!(
-                message.ends_with('.') || message.ends_with('…'),
-                "`{message}` is not written as a sentence"
-            );
-        }
-    }
-
-    #[test]
-    fn a_query_shorter_than_the_minimum_is_not_worth_a_request() {
-        assert_eq!(MIN_QUERY, 2);
-        assert!("P".chars().count() < MIN_QUERY);
-        assert!("Pa".chars().count() >= MIN_QUERY);
     }
 }

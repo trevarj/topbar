@@ -97,6 +97,7 @@ rss() {
 # three seconds and hope, and the media card is one of the two the comment at
 # the top of smoke-shot.sh is about.
 . "$(dirname "$0")/smoke-shot.sh"
+. "$(dirname "$0")/smoke-pointer.sh"
 
 # Every capture here is of the control panel, which is a popover.
 card() {
@@ -126,6 +127,12 @@ card media-1-one-player
   --status Paused --length 120000000 >/dev/null 2>&1 &
 two=$!
 card media-2-two-players
+picker_dump
+active_before=$(picker_read labels media-switcher-active)
+picker_probe "GtkButton media-switcher-button" "Filter players" auror
+picker_dump
+[ "$(picker_read labels media-switcher-active)" = "$active_before" ]
+card media-2-filtering-no-activation
 
 # WordChar must also break a title with no word boundaries, with both switcher
 # buttons still visible and the cover retaining its square allocation.
@@ -140,9 +147,25 @@ control smokeone SetStatus '"Paused"'
 control smoketwo SetStatus '"Playing"'
 card media-3-relevance-moved
 
-# The other half of the rule — a pin, which outranks all of this — is only
-# reachable by clicking a switcher button, and there is no synthetic pointer
-# in the dev shell. It is covered by the bus tests instead.
+# A filtered native option pins the original player, not its filtered position.
+picker_focus "GtkButton media-switcher-button"
+type_text auror
+picker_focus "GtkButton media-switcher-button"
+key_press Return
+picker_dump
+[ "$(picker_read labels media-switcher-active)" = "$active_before" ]
+picker_click "Filter players"
+wtype -M ctrl -k a -m ctrl
+key_press BackSpace
+card media-3-filtered-player-pinned
+# Restore the player whose real track/art updates the existing churn check drives.
+picker_focus "GtkButton media-switcher-button"
+type_text bcpl
+picker_focus "GtkButton media-switcher-button"
+key_press Return
+picker_click "Filter players"
+wtype -M ctrl -k a -m ctrl
+key_press BackSpace
 
 # --- the leak check ---------------------------------------------------------
 before=$(rss)

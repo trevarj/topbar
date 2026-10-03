@@ -1888,6 +1888,7 @@ version = "2.0.0"
 dependencies = [
  "futures-util",
  "gio",
+ "gio-unix",
  "libc",
  "libpulse-binding",
  "minreq",

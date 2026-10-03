@@ -202,6 +202,14 @@ pub const CHOOSER_RANDOM: &str = "chooser-random";
 pub const CHOOSER_MESSAGE: &str = "chooser-message";
 /// The chooser's search field.
 pub const CHOOSER_SEARCH: &str = "chooser-search";
+/// A local type-to-search event boundary.
+pub const PICKER_SCOPE: &str = "picker-scope";
+/// A scoped choice query.
+pub const PICKER_SEARCH: &str = "picker-search";
+/// A committed-value selector.
+pub const PICKER_SELECTOR: &str = "picker-selector";
+/// An activatable original-index choice.
+pub const PICKER_OPTION: &str = "picker-option";
 /// The scrollable result list.
 pub const CHOOSER_RESULTS: &str = "chooser-results";
 /// One candidate row or card.
@@ -506,6 +514,14 @@ pub const EMPTY_STATE_LABEL: &str = "empty-state-label";
 pub const DND_ROW: &str = "dnd-row";
 /// Its label.
 pub const DND_LABEL: &str = "dnd-label";
+/// The notification column's Do Not Disturb switch.
+pub const NOTIFICATION_DND: &str = "notification-dnd";
+/// The native notification sound selector beside Do Not Disturb.
+pub const NOTIFICATION_SOUND: &str = "notification-sound";
+/// The custom notification sound's editable local path.
+pub const NOTIFICATION_SOUND_PATH: &str = "notification-sound-path";
+/// Apply a custom notification sound path.
+pub const NOTIFICATION_SOUND_APPLY: &str = "notification-sound-apply";
 /// The notifications column's header row.
 pub const NOTIFICATION_HEADER: &str = "notification-header";
 /// The Clear button in it.
@@ -814,6 +830,10 @@ pub const ALL: &[&str] = &[
     CHOOSER_RANDOM,
     CHOOSER_MESSAGE,
     CHOOSER_SEARCH,
+    PICKER_SCOPE,
+    PICKER_SEARCH,
+    PICKER_SELECTOR,
+    PICKER_OPTION,
     CHOOSER_RESULTS,
     CHOOSER_RESULT,
     CHOOSER_RESULT_SELECTED,
@@ -954,6 +974,10 @@ pub const ALL: &[&str] = &[
     EMPTY_STATE_LABEL,
     DND_ROW,
     DND_LABEL,
+    NOTIFICATION_DND,
+    NOTIFICATION_SOUND,
+    NOTIFICATION_SOUND_PATH,
+    NOTIFICATION_SOUND_APPLY,
     NOTIFICATION_HEADER,
     NOTIFICATION_CLEAR_ALL,
     NOTIFICATION_LIST,

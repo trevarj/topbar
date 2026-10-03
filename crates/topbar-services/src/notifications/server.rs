@@ -37,6 +37,7 @@ const SPEC_VERSION: &str = "1.2";
 /// Carried over from v1 unchanged. `action-icons` is deliberately absent: the
 /// panel draws action labels, not icons, and claiming otherwise makes senders
 /// send an icon name where a label belongs.
+/// `sound` is absent: fixed panel sounds do not implement the `sound-file` hint.
 pub(super) const CAPABILITIES: &[&str] = &[
     "body",
     "body-markup",
@@ -74,6 +75,7 @@ impl Server {
             actions: pair_actions(&actions),
             urgency: hints.urgency,
             transient: hints.transient,
+            suppress_sound: hints.suppress_sound,
             icon: IconSource {
                 image_data: hints.image_data,
                 image_path: hints.image_path,

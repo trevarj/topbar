@@ -50,6 +50,52 @@ impl Urgency {
     }
 }
 
+/// The panel's optional notification sound. Unknown saved choices stay quiet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationSound {
+    /// A short freedesktop bell, played softly.
+    SoftBell,
+    /// A freedesktop completion chime, played softly.
+    SoftChime,
+    /// The freedesktop message sound.
+    Message,
+    /// The freedesktop instant-message sound.
+    MessageNewInstant,
+    /// The freedesktop information sound.
+    DialogInformation,
+    /// The freedesktop volume-change sound.
+    AudioVolumeChange,
+    /// The freedesktop device-added sound.
+    DeviceAdded,
+    /// The freedesktop device-removed sound.
+    DeviceRemoved,
+    /// A user-selected local audio file.
+    Custom,
+    /// Notifications remain silent.
+    #[default]
+    #[serde(other)]
+    Off,
+}
+
+#[cfg(not(test))]
+impl NotificationSound {
+    /// The pinned theme asset, if this is a built-in sound.
+    pub(super) fn filename(self) -> Option<&'static str> {
+        match self {
+            Self::SoftBell => Some("bell.oga"),
+            Self::SoftChime => Some("complete.oga"),
+            Self::Message => Some("message.oga"),
+            Self::MessageNewInstant => Some("message-new-instant.oga"),
+            Self::DialogInformation => Some("dialog-information.oga"),
+            Self::AudioVolumeChange => Some("audio-volume-change.oga"),
+            Self::DeviceAdded => Some("device-added.oga"),
+            Self::DeviceRemoved => Some("device-removed.oga"),
+            Self::Off | Self::Custom => None,
+        }
+    }
+}
+
 /// Why a notification was closed.
 ///
 /// The discriminants are the `NotificationClosed` reason codes from the
@@ -247,6 +293,10 @@ pub struct NotifState {
     pub enabled: bool,
     /// Whether Do Not Disturb is on.
     pub dnd: bool,
+    /// The sound for new external banners, unless quiet policy suppresses it.
+    pub sound: NotificationSound,
+    /// The last custom local path, retained while a built-in sound or Off is selected.
+    pub custom_sound_path: Option<String>,
     /// Toasts on screen, newest first.
     pub toasts: Vec<ToastView>,
     /// History, grouped by application, newest group first.
@@ -279,6 +329,10 @@ impl NotifState {
 pub struct PersistedNotifications {
     /// Whether Do Not Disturb was on when the panel last ran.
     pub dnd: bool,
+    /// The user's sound choice; missing and unknown choices default to Off.
+    pub sound: NotificationSound,
+    /// The last custom local path, retained independently of the selected sound.
+    pub custom_sound_path: Option<String>,
     /// The next id to hand out, so a restart cannot reuse a live id.
     pub next_id: u32,
     /// History, newest first, bounded by the daemon's cap.
@@ -462,12 +516,46 @@ mod tests {
     fn persisted_history_survives_json() {
         let state = PersistedNotifications {
             dnd: true,
+            sound: NotificationSound::SoftChime,
+            custom_sound_path: Some("/home/test/notification sound.oga".into()),
             next_id: 12,
             history: vec![PersistedNotification::from_view(&view())],
         };
         let json = serde_json::to_string(&state).expect("serialise");
         let back: PersistedNotifications = serde_json::from_str(&json).expect("deserialise");
         assert_eq!(back, state);
+        for (sound, expected) in [
+            ("off", NotificationSound::Off),
+            ("soft_bell", NotificationSound::SoftBell),
+            ("soft_chime", NotificationSound::SoftChime),
+            ("message", NotificationSound::Message),
+            ("message_new_instant", NotificationSound::MessageNewInstant),
+            ("dialog_information", NotificationSound::DialogInformation),
+            ("audio_volume_change", NotificationSound::AudioVolumeChange),
+            ("device_added", NotificationSound::DeviceAdded),
+            ("device_removed", NotificationSound::DeviceRemoved),
+            ("custom", NotificationSound::Custom),
+            ("future_sound", NotificationSound::Off),
+        ] {
+            let mut document = serde_json::to_value(&state).expect("JSON");
+            document["sound"] = sound.into();
+            let restored: PersistedNotifications =
+                serde_json::from_value(document).expect("unknown sound must not lose history");
+            assert_eq!(restored.history, state.history);
+            assert_eq!(restored.dnd, state.dnd);
+            assert_eq!(restored.sound, expected);
+            assert_eq!(restored.custom_sound_path, state.custom_sound_path);
+        }
+        let mut legacy = serde_json::to_value(&state).expect("JSON");
+        legacy.as_object_mut().expect("object").remove("sound");
+        legacy
+            .as_object_mut()
+            .expect("object")
+            .remove("custom_sound_path");
+        let restored: PersistedNotifications = serde_json::from_value(legacy).expect("legacy");
+        assert_eq!(restored.sound, NotificationSound::Off);
+        assert_eq!(restored.custom_sound_path, None);
+        assert_eq!(restored.history, state.history);
     }
 
     #[test]

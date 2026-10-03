@@ -185,12 +185,28 @@ The control panel's media card keeps artwork at 104px square. Metadata uses the
 remaining column width: titles wrap to at most three lines with an end ellipsis,
 and artists stay on one ellipsized line, so long tracks do not widen the popover.
 
+**Picker input** (`surfaces/search.rs`) is scoped to each option section.
+Native key events are forwarded to GTK's editable delegate from focused choices;
+ordinary editors and nested pickers retain their own input. Static selectors
+compose a MenuButton, Popover, SearchEntry and native option buttons. Filtering
+never commits a value: activation reports its original index, and each opening
+starts a fresh query. Dynamic lists hide nonmatches without changing service
+order, stable identities or active password/pairing prompts.
+
 **Toasts** (`surfaces/toast.rs`): one surface per monitor, and only the one on
 the focused output shows anything. It unmaps when empty, so a transparent
 window never eats desktop clicks. The expiry timer lives in the notification
 *service*, not the widget — hovering a banner is a `pause_toast` call rather
 than a local `SourceId`, so a banner replaced over D-Bus mid-hover cannot end
 up with two timers.
+
+Optional notification sounds are a service-side receipt effect, never a GTK
+render effect. New admitted external banners may launch bounded asynchronous
+`paplay` playback of a packaged sound or a user-selected local file at low stream
+volume. Choice and custom path share notification state persistence with Do Not
+Disturb. Custom paths are validated on a blocking worker before an atomic
+preference update. Quiet hints, DND and replacements suppress playback.
+Playback failures only warn and leave notification delivery intact.
 
 **The OSD capsule** (`surfaces/osd.rs`) takes no keyboard focus and has an empty
 input region, so a press goes through to whatever is underneath. Its timer is a

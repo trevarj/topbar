@@ -27,12 +27,13 @@ use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
 use gtk4::prelude::*;
-use gtk4::{Align, Image, Label, Orientation, Separator};
+use gtk4::{Align, Button, Image, Label, Orientation, Separator};
 use topbar_services::{MenuEvent, MenuKind, MenuNode, Services, ToggleKind};
 
 use crate::bridge::{self, ActionScope};
 use crate::style::classes;
 use crate::surfaces::popovers::PopoverContent;
+use crate::surfaces::search::ChoiceFilter;
 
 use super::WIDGET_NAME;
 
@@ -59,6 +60,7 @@ pub struct TrayMenu {
     back_label: Label,
     /// Where the rows go.
     list: gtk4::Box,
+    filter: Rc<ChoiceFilter>,
     /// The item whose menu this is, and the menu it last fetched.
     showing: RefCell<Option<Showing>>,
     /// How deep into the menu the user has gone: the id of each submenu
@@ -85,6 +87,8 @@ impl TrayMenu {
 
         let (back, back_label) = back_row();
         root.append(&back);
+        let filter = ChoiceFilter::new(&root, "Filter menu choices");
+        filter.search.set_visible(false);
 
         let list = gtk4::Box::new(Orientation::Vertical, 0);
         list.add_css_class(classes::TRAY_MENU_LIST);
@@ -95,6 +99,7 @@ impl TrayMenu {
             back,
             back_label,
             list,
+            filter,
             showing: RefCell::new(None),
             path: RefCell::new(Vec::new()),
             services: services.clone(),
@@ -113,6 +118,7 @@ impl TrayMenu {
     /// on the frame it appears rather than growing as the answer arrives.
     pub fn aim_at(&self, id: &str) {
         *self.path.borrow_mut() = Vec::new();
+        self.filter.search.set_text("");
         let mut showing = self.showing.borrow_mut();
         if showing.as_ref().is_none_or(|open| open.id != id) {
             *showing = Some(Showing {
@@ -156,6 +162,7 @@ impl TrayMenu {
 
     /// Draw the level the user is looking at.
     fn draw(&self) {
+        self.filter.clear_rows();
         while let Some(child) = self.list.first_child() {
             self.list.remove(&child);
         }
@@ -181,7 +188,12 @@ impl TrayMenu {
             }
         }
         let depth = reached.len();
+        if *self.path.borrow() != reached {
+            self.filter.search.set_text("");
+        }
         *self.path.borrow_mut() = reached;
+        let choices = level.rows().any(|entry| entry.toggle != ToggleKind::None);
+        self.filter.search.set_visible(choices);
 
         self.back.set_visible(depth > 0);
         if depth > 0 {
@@ -203,13 +215,20 @@ impl TrayMenu {
                     rule.add_css_class(classes::TRAY_MENU_SEPARATOR);
                     self.list.append(&rule);
                 }
-                MenuKind::Standard => self.list.append(&self.row(entry, &id)),
+                MenuKind::Standard => {
+                    let row = self.row(entry, &id, choices);
+                    if entry.toggle != ToggleKind::None {
+                        self.filter.add(&row, entry.label.clone(), None);
+                    }
+                    self.list.append(&row);
+                }
             }
         }
+        self.filter.apply();
     }
 
     /// Build one row.
-    fn row(&self, entry: &MenuNode, item: &str) -> gtk4::Box {
+    fn row(&self, entry: &MenuNode, item: &str, choices: bool) -> gtk4::Widget {
         let row = gtk4::Box::new(Orientation::Horizontal, 8);
         row.add_css_class(classes::TRAY_MENU_ROW);
 
@@ -257,11 +276,54 @@ impl TrayMenu {
             row.append(&chevron);
         }
 
+        if choices {
+            let role = match entry.toggle {
+                ToggleKind::Radio => gtk4::AccessibleRole::MenuItemRadio,
+                ToggleKind::Checkmark => gtk4::AccessibleRole::MenuItemCheckbox,
+                ToggleKind::None => gtk4::AccessibleRole::MenuItem,
+            };
+            let button = Button::builder().accessible_role(role).build();
+            button.add_css_class(classes::TRAY_MENU_ROW);
+            if entry.toggle != ToggleKind::None {
+                button.add_css_class(classes::PICKER_OPTION);
+            }
+            row.remove_css_class(classes::TRAY_MENU_ROW);
+            button.set_child(Some(&row));
+            button.set_sensitive(entry.enabled);
+            if !entry.enabled {
+                button.add_css_class(classes::DISABLED);
+            }
+            button.update_property(&[gtk4::accessible::Property::Label(&entry.label)]);
+            if entry.toggle != ToggleKind::None {
+                let checked = match entry.toggle_state {
+                    topbar_services::ToggleState::On => gtk4::AccessibleTristate::True,
+                    topbar_services::ToggleState::Off => gtk4::AccessibleTristate::False,
+                    topbar_services::ToggleState::Indeterminate => gtk4::AccessibleTristate::Mixed,
+                };
+                button.update_state(&[gtk4::accessible::State::Checked(checked)]);
+            }
+            button.connect_clicked({
+                let me = self.me.clone();
+                let item = item.to_string();
+                let entry_id = entry.id;
+                let submenu = entry.has_submenu;
+                move |_| {
+                    if let Some(this) = me.upgrade() {
+                        if submenu {
+                            this.enter(entry_id);
+                        } else {
+                            this.choose(&item, entry_id);
+                        }
+                    }
+                }
+            });
+            return button.upcast();
+        }
         if !entry.enabled {
             // Dimmed *and* inert: a row the application has switched off must
             // not send an event when it is clicked.
             row.add_css_class(classes::DISABLED);
-            return row;
+            return row.upcast();
         }
 
         row.set_cursor_from_name(Some("pointer"));
@@ -284,7 +346,7 @@ impl TrayMenu {
             }
         });
         row.add_controller(click);
-        row
+        row.upcast()
     }
 
     /// Go into a submenu.
@@ -293,6 +355,7 @@ impl TrayMenu {
     /// they are hovered, and one that has just been asked to will have sent a
     /// fresh layout by the time it is fetched again.
     fn enter(&self, entry_id: i32) {
+        self.filter.search.set_text("");
         self.path.borrow_mut().push(entry_id);
         self.draw();
         self.send(entry_id, MenuEvent::Hovered);
@@ -319,6 +382,7 @@ impl TrayMenu {
 
     /// Come back out of one.
     fn leave(&self) {
+        self.filter.search.set_text("");
         self.path.borrow_mut().pop();
         self.draw();
     }
@@ -357,6 +421,7 @@ impl PopoverContent for TrayMenu {
 
     fn closed(&self) {
         *self.path.borrow_mut() = Vec::new();
+        self.filter.search.set_text("");
     }
 }
 

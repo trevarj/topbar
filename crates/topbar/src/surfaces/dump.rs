@@ -41,6 +41,10 @@ const LOCATABLE: &[&str] = &[
     classes::NOTIFICATION_GROUP,
     classes::EMPTY_STATE,
     classes::CLOCK_UNSEEN,
+    classes::PICKER_OPTION,
+    classes::QS_DEVICE_ROW,
+    classes::TRAY_MENU_BACK,
+    classes::CHOOSER_EMPTY,
 ];
 
 /// Register `topbar popover show surface-dump`.
@@ -74,20 +78,25 @@ fn surfaces() {
         if !LayerShell::is_layer_window(&window) || !window.is_visible() {
             continue;
         }
-        let (origin_x, origin_y) = origin(&window);
-        tracing::info!(
-            "ui-dump: surface \"{}\" {origin_x} {origin_y} {} {}",
-            LayerShell::namespace(&window).unwrap_or_default(),
-            window.width(),
-            window.height(),
-        );
-        tree(
-            &window.clone().upcast(),
-            &window,
-            (origin_x, origin_y),
-            "ui-dump",
-        );
+        window_tree(&window, "ui-dump");
     }
+}
+
+/// Dump one standalone chooser too; it deliberately has no panel IPC service.
+pub fn window_tree(window: &gtk4::Window, prefix: &str) {
+    let (origin_x, origin_y) = origin(window);
+    tracing::info!(
+        "{prefix}: surface \"{}\" {origin_x} {origin_y} {} {}",
+        LayerShell::namespace(window).unwrap_or_default(),
+        window.width(),
+        window.height(),
+    );
+    tree(
+        &window.clone().upcast(),
+        window,
+        (origin_x, origin_y),
+        prefix,
+    );
 }
 
 /// Where `window` sits on the monitor, in logical pixels.
@@ -97,7 +106,8 @@ fn surfaces() {
 /// margins, and the compositor resolves them. Three cases cover every surface
 /// the panel has — anchored to an edge (the popovers, top-left), anchored to
 /// one edge of an axis and therefore centred on the other (the banners and the
-/// capsule), and stretched across both (the click-catcher).
+/// capsule), centred on both axes (the dialogs), and stretched across both (the
+/// click-catcher). Zero-zone surfaces centre within the area below the bar.
 fn origin(window: &gtk4::Window) -> (i32, i32) {
     let (monitor_width, monitor_height) = monitor_size(window);
     // Only a surface that asks for a zone of exactly zero is pushed below
@@ -126,6 +136,7 @@ fn origin(window: &gtk4::Window) -> (i32, i32) {
         (false, true) => {
             monitor_height - window.height() - LayerShell::margin(window, Edge::Bottom)
         }
+        (false, false) => reserved + (monitor_height - reserved - window.height()) / 2,
         _ => reserved + LayerShell::margin(window, Edge::Top),
     };
     (x, y)
@@ -155,7 +166,9 @@ pub fn tree(widget: &gtk4::Widget, window: &gtk4::Window, origin: (i32, i32), pr
     }
     let interactive = widget.is::<gtk4::Button>()
         || widget.is::<gtk4::Scale>()
+        || widget.is::<gtk4::Expander>()
         || widget.is::<gtk4::Switch>()
+        || widget.is::<gtk4::MenuButton>()
         || widget.is::<gtk4::Editable>()
         || LOCATABLE.iter().any(|class| widget.has_css_class(class));
     if interactive && let Some(bounds) = widget.compute_bounds(window) {
@@ -165,7 +178,7 @@ pub fn tree(widget: &gtk4::Widget, window: &gtk4::Window, origin: (i32, i32), pr
         // first time a machine turned out to have no VPN profiles. Every line
         // of it, because a notification row is a summary, an age and a body.
         tracing::info!(
-            "{prefix}: {} [{}] \"{}\" {} {} {} {} sensitive={}",
+            "{prefix}: {} [{}] \"{}\" {} {} {} {} sensitive={} focused={}",
             widget.type_().name(),
             widget.css_classes().join("."),
             labels_of(widget).join(" · "),
@@ -174,6 +187,7 @@ pub fn tree(widget: &gtk4::Widget, window: &gtk4::Window, origin: (i32, i32), pr
             bounds.width().round() as i32,
             bounds.height().round() as i32,
             widget.is_sensitive(),
+            crate::surfaces::search::focused(widget),
         );
     }
 
@@ -186,6 +200,29 @@ pub fn tree(widget: &gtk4::Widget, window: &gtk4::Window, origin: (i32, i32), pr
 
 /// Every visible label under `widget`, which is what a control is called.
 fn labels_of(widget: &gtk4::Widget) -> Vec<String> {
+    if let Some(label) = widget.downcast_ref::<gtk4::Label>() {
+        return vec![label.text().to_string()];
+    }
+    if let Some(entry) = widget.downcast_ref::<gtk4::SearchEntry>() {
+        return vec![
+            entry.placeholder_text().unwrap_or_default().to_string(),
+            entry.text().to_string(),
+        ];
+    }
+    if let Some(entry) = widget.downcast_ref::<gtk4::Entry>()
+        && [
+            classes::CHOOSER_SEARCH,
+            classes::LAUNCHER_SEARCH,
+            classes::LOCATION_SEARCH,
+        ]
+        .iter()
+        .any(|class| widget.has_css_class(class))
+    {
+        return vec![
+            entry.placeholder_text().unwrap_or_default().to_string(),
+            entry.text().to_string(),
+        ];
+    }
     let mut found = Vec::new();
     let mut child = widget.first_child();
     while let Some(current) = child {
@@ -196,6 +233,12 @@ fn labels_of(widget: &gtk4::Widget) -> Vec<String> {
             }
         }
         child = current.next_sibling();
+    }
+    if found.is_empty()
+        && widget.is::<gtk4::Button>()
+        && let Some(tooltip) = widget.tooltip_text()
+    {
+        found.push(tooltip.to_string());
     }
     found
 }

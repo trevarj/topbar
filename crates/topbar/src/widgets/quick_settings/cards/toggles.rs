@@ -38,6 +38,7 @@ use crate::anim::{Animation, AnimationParams, Easing, RotateBox, ripple};
 use crate::bridge::{self, BindingGuard};
 use crate::style::{classes, icons};
 use crate::surfaces::inline::{self, names};
+use crate::surfaces::search::ChoiceFilter;
 use crate::widgets::expander::{Accordion, REVEAL_MS, Section};
 use crate::widgets::quick_settings::cards::bluetooth::BluetoothList;
 use crate::widgets::quick_settings::cards::network::{self, VpnList, WifiList};
@@ -235,6 +236,7 @@ pub struct Toggles {
     power_mode: Option<Rc<Pill>>,
     power_mode_section: Option<Rc<Section>>,
     power_mode_list: gtk4::Box,
+    profile_filter: Rc<ChoiceFilter>,
     /// The profiles the list was last built from, so it is not rebuilt on
     /// every percentage change the daemon happens to publish alongside.
     built_profiles: RefCell<Vec<String>>,
@@ -295,9 +297,12 @@ impl Toggles {
         // one stands in until the daemon has said which profile is in force.
         let power_mode = Some(Pill::new(POWER_MODE_ICON, "Power Mode", true));
 
+        let power_mode_scope = gtk4::Box::new(Orientation::Vertical, 2);
+        power_mode_scope.add_css_class(classes::QS_DEVICE_LIST);
+        let profile_filter = ChoiceFilter::new(&power_mode_scope, "Filter power profiles");
         let power_mode_list = gtk4::Box::new(Orientation::Vertical, 2);
-        power_mode_list.add_css_class(classes::QS_DEVICE_LIST);
-        let power_mode_section = Section::new(&power_mode_list);
+        power_mode_scope.append(&power_mode_list);
+        let power_mode_section = Section::new(&power_mode_scope);
         accordion.add(&power_mode_section);
 
         let (wifi_error, wifi_slot) = inline::slot(names::WIFI);
@@ -394,6 +399,7 @@ impl Toggles {
             power_mode,
             power_mode_section: Some(power_mode_section),
             power_mode_list,
+            profile_filter,
             built_profiles: RefCell::new(Vec::new()),
             profile_marks: RefCell::new(Vec::new()),
             discovering: std::cell::Cell::new(false),
@@ -798,6 +804,7 @@ impl Toggles {
 
     /// Rebuild the radio rows: exactly the profiles the daemon reports.
     fn rebuild_profiles(&self, state: &PowerProfilesState) {
+        self.profile_filter.clear_rows();
         while let Some(child) = self.power_mode_list.first_child() {
             self.power_mode_list.remove(&child);
         }
@@ -842,9 +849,12 @@ impl Toggles {
                 }
             });
             self.power_mode_list.append(&row);
+            self.profile_filter
+                .add(&row, format!("{} {}", profile.label, profile.id), None);
         }
 
         *self.profile_marks.borrow_mut() = marks;
+        self.profile_filter.apply();
     }
 
     /// Move the checkmark to the profile in force.

@@ -467,7 +467,7 @@ grep -q '^animations = false$' "$light_config" || {
 # entrypoint branch rather than the ordinary topbar command parser.
 pinentry_bin="$repo/target/debug/topbar-pinentry"
 
-blur_log="topbar::wayland::blur=debug"
+blur_log="topbar::wayland::blur=debug,topbar::chooser=info,topbar::surfaces::dump=info"
 if [ -n "${RUST_LOG:-}" ]; then
   blur_log="$RUST_LOG,$blur_log"
 fi

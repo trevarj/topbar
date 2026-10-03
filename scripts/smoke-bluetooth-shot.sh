@@ -10,6 +10,7 @@
 set -eu
 
 . "$(dirname "$0")/smoke-shot.sh"
+. "$(dirname "$0")/smoke-pointer.sh"
 
 scenario="${SMOKE_BT_SCENARIO:-devices}"
 art="$SMOKE_ARTIFACTS"
@@ -98,9 +99,14 @@ case "$scenario" in
     fake TriggerConfirmation "kb" 123456
     sleep 4
     shot pairing-prompt topbar-popover
-    # Through the service handle, the way the row's own Confirm button sends
-    # it — there is no pointer to press it with.
-    "$SMOKE_TOPBAR" popover show quick-settings-bluetooth-confirm >/dev/null 2>&1 || true
+    picker_click "Filter Bluetooth devices"
+    type_text zzzzz
+    picker_dump
+    picker_read query "Filter Bluetooth devices" zzzzz
+    [ "$(picker_read count Confirm)" -gt 0 ]
+    shot pairing-filtered-prompt topbar-popover
+    # Even a no-match query cannot hide the active native confirmation button.
+    picker_click Confirm
     sleep 5
     shot pairing-after topbar-popover
     # The fake recorded what came back out of its own Agent1 call, which is

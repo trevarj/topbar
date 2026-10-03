@@ -26,10 +26,11 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk4::prelude::*;
-use gtk4::{Align, Button, DropDown, Label, Orientation, Switch};
+use gtk4::{Align, Button, Label, Orientation, Switch};
 use topbar_services::{Asset, Entry, Services};
 
 use crate::style::classes;
+use crate::surfaces::search::{ChoiceFilter, SearchSelector};
 use crate::widgets::crypto::{emblem, icons};
 
 /// Logo size on a settings row. A pair's two coins each take 5/8 of this.
@@ -48,12 +49,13 @@ pub struct Settings {
     root: gtk4::Box,
     /// One per supported asset, in [`Asset::ALL`] order.
     assets: Vec<AssetRow>,
+    _asset_filter: Rc<ChoiceFilter>,
     /// Where the pair rows are appended and removed.
     pairs: gtk4::Box,
     /// The pair rows currently in `pairs`.
     pair_rows: RefCell<Vec<PairRow>>,
-    numerator: DropDown,
-    denominator: DropDown,
+    numerator: Rc<SearchSelector>,
+    denominator: Rc<SearchSelector>,
     add: Button,
     /// The entries the view was last drawn from.
     entries: RefCell<Vec<Entry>>,
@@ -88,16 +90,26 @@ impl Settings {
 
         // --- the three assets -----------------------------------------------
         root.append(&section_label("Assets"));
+        let asset_scope = gtk4::Box::new(Orientation::Vertical, 2);
+        let asset_filter = ChoiceFilter::new(&asset_scope, "Filter assets");
+        root.append(&asset_scope);
 
         let updating = Rc::new(Cell::new(false));
         let assets: Vec<AssetRow> = Asset::ALL
             .iter()
             .map(|asset| {
                 let row = AssetRow::new(*asset);
-                root.append(&row.root);
+                row.root.add_css_class(classes::PICKER_OPTION);
+                asset_scope.append(&row.root);
+                asset_filter.add(
+                    &row.root,
+                    format!("{} {}", asset.name(), asset.symbol()),
+                    None,
+                );
                 row
             })
             .collect();
+        asset_filter.apply();
 
         // --- the pairs ------------------------------------------------------
         root.append(&section_label("Pairs"));
@@ -109,8 +121,8 @@ impl Settings {
         add_row.add_css_class(classes::CRYPTO_ADD_PAIR);
 
         let names: Vec<&str> = Asset::ALL.iter().map(|asset| asset.symbol()).collect();
-        let numerator = DropDown::from_strings(&names);
-        let denominator = DropDown::from_strings(&names);
+        let numerator = SearchSelector::new("Numerator asset", &names);
+        let denominator = SearchSelector::new("Denominator asset", &names);
         // Ethereum over Bitcoin: the pair the user's own script printed, and
         // the one they are most likely to want a second of.
         numerator.set_selected(1);
@@ -124,15 +136,16 @@ impl Settings {
         add.set_halign(Align::End);
         add.set_hexpand(true);
 
-        add_row.append(&numerator);
+        add_row.append(numerator.root());
         add_row.append(&separator);
-        add_row.append(&denominator);
+        add_row.append(denominator.root());
         add_row.append(&add);
         root.append(&add_row);
 
         let settings = Rc::new(Self {
             root,
             assets,
+            _asset_filter: asset_filter,
             pairs,
             pair_rows: RefCell::new(Vec::new()),
             numerator,
@@ -187,12 +200,11 @@ impl Settings {
                 }
             }
         };
-        self.numerator.connect_selected_notify({
+        self.numerator.connect_selected({
             let refresh_add = refresh_add.clone();
             move |_| refresh_add()
         });
-        self.denominator
-            .connect_selected_notify(move |_| refresh_add());
+        self.denominator.connect_selected(move |_| refresh_add());
 
         self.add.connect_clicked({
             let weak = Rc::downgrade(self);
@@ -216,11 +228,11 @@ impl Settings {
         }
     }
 
-    /// Which pair the two dropdowns are naming.
+    /// Which pair the two selectors are naming.
     fn chosen_pair(&self) -> (Asset, Asset) {
-        let pick = |dropdown: &DropDown| {
+        let pick = |selector: &Rc<SearchSelector>| {
             Asset::ALL
-                .get(dropdown.selected() as usize)
+                .get(selector.selected() as usize)
                 .copied()
                 .unwrap_or(Asset::Btc)
         };

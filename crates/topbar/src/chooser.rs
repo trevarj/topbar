@@ -29,7 +29,7 @@ use crate::anim::{Animation, AnimationParams, Easing};
 use crate::cli::ChooseLayout;
 use crate::ipc_client;
 use crate::style::{self, classes, icons};
-use crate::surfaces::modal;
+use crate::surfaces::{modal, search};
 use crate::wayland::blur::BlurAttachment;
 
 /// Refuse a pipe large enough to make an accidental binary input painful.
@@ -1748,6 +1748,18 @@ impl Chooser {
     }
 
     fn wire(self: &Rc<Self>, cancel: &Button) {
+        search::install(&self.window, {
+            let weak = Rc::downgrade(self);
+            move |_| {
+                weak.upgrade().map(|chooser| {
+                    if chooser.on_wallhaven() {
+                        chooser.filter.clone().upcast()
+                    } else {
+                        chooser.search.clone().upcast()
+                    }
+                })
+            }
+        });
         self.random.connect_clicked({
             let weak = Rc::downgrade(self);
             move |_| {
@@ -1815,8 +1827,17 @@ impl Chooser {
                 let Some(chooser) = weak.upgrade() else {
                     return glib::Propagation::Proceed;
                 };
+                if search::nested_focus(&chooser.window) {
+                    return glib::Propagation::Proceed;
+                }
                 if matches!(key, gdk::Key::Tab | gdk::Key::ISO_Left_Tab)
                     && modifiers.contains(gdk::ModifierType::CONTROL_MASK)
+                    && !modifiers.intersects(
+                        gdk::ModifierType::ALT_MASK
+                            | gdk::ModifierType::SUPER_MASK
+                            | gdk::ModifierType::META_MASK
+                            | gdk::ModifierType::HYPER_MASK,
+                    )
                 {
                     let on_wallhaven = chooser
                         .wallpaper
@@ -1830,24 +1851,25 @@ impl Chooser {
                     }
                     return glib::Propagation::Stop;
                 }
+                if search::shortcut(modifiers) || modifiers.contains(gdk::ModifierType::SHIFT_MASK)
+                {
+                    return glib::Propagation::Proceed;
+                }
+                let in_search =
+                    search::focused(&chooser.search) || search::focused(&chooser.filter);
+                let on_row = chooser
+                    .row_widgets
+                    .borrow()
+                    .iter()
+                    .any(|(_, row)| search::focused(row));
                 match key {
                     gdk::Key::Escape => chooser.cancel(),
-                    gdk::Key::Up => chooser.move_selection(-1),
-                    gdk::Key::Down => chooser.move_selection(1),
-                    gdk::Key::Home => chooser.select_at(0),
-                    gdk::Key::End => chooser.select_at(usize::MAX),
-                    gdk::Key::Return | gdk::Key::KP_Enter => {
-                        if chooser.random.has_focus() || chooser.wallhaven_search.has_focus() {
-                            return glib::Propagation::Proceed;
-                        }
-                        let query_focused = chooser.wallhaven_query.has_focus()
-                            || gtk4::prelude::GtkWindowExt::focus(&chooser.window)
-                                .is_some_and(|focus| focus.is_ancestor(&chooser.wallhaven_query));
-                        if chooser.on_wallhaven() && query_focused {
-                            chooser.submit_wallhaven_query();
-                        } else {
-                            chooser.accept();
-                        }
+                    gdk::Key::Up if in_search || on_row => chooser.move_selection(-1),
+                    gdk::Key::Down if in_search || on_row => chooser.move_selection(1),
+                    gdk::Key::Home if on_row => chooser.select_at(0),
+                    gdk::Key::End if on_row => chooser.select_at(usize::MAX),
+                    gdk::Key::Return | gdk::Key::KP_Enter if in_search || on_row => {
+                        chooser.accept()
                     }
                     _ => return glib::Propagation::Proceed,
                 }
@@ -1855,6 +1877,25 @@ impl Chooser {
             }
         });
         self.window.add_controller(keys);
+        #[cfg(debug_assertions)]
+        if std::env::var_os("SMOKE_ARTIFACTS").is_some() {
+            let snapshots = gtk4::EventControllerKey::new();
+            snapshots.set_propagation_phase(gtk4::PropagationPhase::Capture);
+            snapshots.connect_key_released({
+                let window = self.window.downgrade();
+                move |_, _, _, _| {
+                    let window = window.clone();
+                    glib::idle_add_local_once(move || {
+                        if let Some(window) = window.upgrade() {
+                            tracing::info!("chooser-dump: begin");
+                            crate::surfaces::dump::window_tree(&window, "chooser-dump");
+                            tracing::info!("chooser-dump: end");
+                        }
+                    });
+                }
+            });
+            self.window.add_controller(snapshots);
+        }
         self.window.connect_close_request({
             let weak = Rc::downgrade(self);
             move |_| {

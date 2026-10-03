@@ -246,7 +246,7 @@ pub fn dispatch(action: &PopoverAction, connector: Option<&str>) -> bool {
 pub fn close_all() -> bool {
     let mut closed = false;
     for entry in live_entries() {
-        entry.close();
+        entry.host.close();
         closed = true;
     }
     closed

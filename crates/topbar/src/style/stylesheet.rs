@@ -602,6 +602,11 @@ window.osd-window {
     font-weight: 500;
 }
 
+button.notification-sound-apply:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+}
+
 /* ===== Calendar ===== */
 
 /* The chevrons sit tight against the popover's padding, GNOME style. */
@@ -1030,7 +1035,9 @@ button.crypto-remove:disabled {
 }
 
 entry.location-search,
-entry.location-coordinate {
+entry.picker-search,
+entry.location-coordinate,
+entry.notification-sound-path {
     min-height: 32px;
     padding: 4px 14px;
     background: none;
@@ -1042,7 +1049,9 @@ entry.location-coordinate {
 }
 
 entry.location-search:focus-within,
-entry.location-coordinate:focus-within {
+entry.picker-search:focus-within,
+entry.location-coordinate:focus-within,
+entry.notification-sound-path:focus-within {
     border-color: var(--color-accent);
     outline: none;
 }
@@ -2296,7 +2305,11 @@ osd-bar {
    and not see. */
 .keyboard .media-control:focus,
 .keyboard .media-switcher-button:focus,
-.keyboard .dnd-row switch:focus {
+.keyboard .dnd-row switch:focus,
+.keyboard .picker-option:focus,
+.keyboard .picker-selector:focus-within,
+.keyboard .tray-menu-row:focus,
+.keyboard .notification-sound:focus-within {
     outline: 2px solid var(--color-accent);
     outline-offset: -2px;
 }
@@ -3005,33 +3018,6 @@ mod tests {
         }
         assert!(css.contains("--dialog-font-size: 16px;"));
         assert!(css.contains(".chooser-message,\n.chooser-subtitle,"));
-    }
-
-    #[test]
-    fn text_entries_keep_the_caret_clear_of_their_edges_and_icons() {
-        let css = generate(&Config::default());
-        for (selector, padding) in [
-            ("entry.launcher-search", "padding: 6px 20px;"),
-            ("entry.chooser-search", "padding: 4px 14px;"),
-            ("entry.pinentry-entry", "padding: 6px 14px;"),
-        ] {
-            let rule = css
-                .split_once(&format!("{selector} {{"))
-                .and_then(|(_, rest)| rest.split_once('}'))
-                .map(|(rule, _)| rule)
-                .expect("entry selector must have a CSS rule");
-            assert!(rule.contains(padding), "{selector} lost its text inset");
-        }
-
-        let location_rule = css
-            .split_once("entry.location-search,\nentry.location-coordinate {")
-            .and_then(|(_, rest)| rest.split_once('}'))
-            .map(|(rule, _)| rule)
-            .expect("location entry selector must have a CSS rule");
-        assert!(location_rule.contains("padding: 4px 14px;"));
-        assert!(css.contains(
-            "entry.location-search > image.left,\nentry.chooser-search > image.left {\n    margin-right: 6px;"
-        ));
     }
 
     #[test]

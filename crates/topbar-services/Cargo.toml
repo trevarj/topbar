@@ -73,3 +73,6 @@ toml = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 zbus = { workspace = true }
+
+[dev-dependencies]
+gio-unix = "0.22"

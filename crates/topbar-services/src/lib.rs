@@ -99,8 +99,8 @@ pub use network::{
 };
 pub use niri::{Niri, NiriHandle};
 pub use notifications::{
-    Action, CloseReason, GroupView, IconSource, ImageData, NotifState, NotificationView,
-    Notifications, NotificationsHandle, ToastView, Urgency,
+    Action, CloseReason, GroupView, IconSource, ImageData, NotifState, NotificationSound,
+    NotificationView, Notifications, NotificationsHandle, ToastView, Urgency,
 };
 pub use notmuch::{MailThread, Notmuch, NotmuchHandle, NotmuchState};
 pub use power::{Power, PowerAction};

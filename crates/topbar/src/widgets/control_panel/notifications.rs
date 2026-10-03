@@ -24,14 +24,17 @@ use std::rc::Rc;
 use chrono::{DateTime, Local};
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Button, EventControllerMotion, GestureClick, Image, Label, Orientation, PolicyType,
-    ScrolledWindow, Switch, gdk, pango,
+    Align, Button, Entry, EventControllerMotion, GestureClick, Image, Label, Orientation,
+    PolicyType, ScrolledWindow, Switch, gdk, pango,
 };
-use topbar_services::{CloseReason, GroupView, NotifState, NotificationView, Services};
+use topbar_services::{
+    CloseReason, GroupView, NotifState, NotificationSound, NotificationView, Services,
+};
 
 use crate::anim::{Animation, AnimationParams, Easing, RotateBox, ripple};
 use crate::bridge::{self, ActionScope, BindingGuard};
 use crate::style::{classes, icons};
+use crate::surfaces::search::SearchSelector;
 use crate::widgets::expander::{REVEAL_MS, Section};
 use crate::widgets::notifications::{
     self as notifications, ROW_ICON, absolute_time, icon, markup, relative_time,
@@ -53,6 +56,19 @@ const SCOPE: ActionScope = ActionScope::Toast {
     widget: "notifications",
 };
 
+const SOUND_CHOICES: &[(&str, NotificationSound)] = &[
+    ("Off", NotificationSound::Off),
+    ("Soft bell", NotificationSound::SoftBell),
+    ("Soft chime", NotificationSound::SoftChime),
+    ("Message", NotificationSound::Message),
+    ("Instant message", NotificationSound::MessageNewInstant),
+    ("Information", NotificationSound::DialogInformation),
+    ("Volume change", NotificationSound::AudioVolumeChange),
+    ("Device added", NotificationSound::DeviceAdded),
+    ("Device removed", NotificationSound::DeviceRemoved),
+    ("Custom", NotificationSound::Custom),
+];
+
 /// The notifications column.
 pub struct Column {
     root: gtk4::Box,
@@ -72,6 +88,13 @@ pub struct Column {
     empty: gtk4::Box,
     /// Do Not Disturb.
     dnd: Switch,
+    /// Fuzzy sound selector, including Off and Custom.
+    sound: Rc<SearchSelector>,
+    custom_sound_row: gtk4::Box,
+    custom_sound_path: Entry,
+    custom_sound_apply: Button,
+    /// Only preference changes overwrite an in-progress path edit.
+    sound_preferences: RefCell<Option<(NotificationSound, Option<String>)>>,
     /// Set while the switch is being driven from a snapshot, so echoing the
     /// service's own state back at it does not look like a user toggle.
     syncing: Rc<Cell<bool>>,
@@ -147,15 +170,58 @@ impl Column {
         dnd_label.set_hexpand(true);
 
         let dnd = Switch::new();
+        dnd.add_css_class(classes::NOTIFICATION_DND);
         dnd.set_valign(Align::Center);
 
         dnd_row.append(&dnd_label);
         dnd_row.append(&dnd);
 
+        let sound_row = gtk4::Box::new(Orientation::Horizontal, 8);
+        sound_row.add_css_class(classes::DND_ROW);
+        let sound_label = Label::new(Some("_Notification sound"));
+        sound_label.set_use_underline(true);
+        sound_label.add_css_class(classes::DND_LABEL);
+        sound_label.set_xalign(0.0);
+        sound_label.set_hexpand(true);
+        let sound = SearchSelector::new(
+            "Notification sound",
+            &SOUND_CHOICES
+                .iter()
+                .map(|(label, _)| *label)
+                .collect::<Vec<_>>(),
+        );
+        sound.root().add_css_class(classes::NOTIFICATION_SOUND);
+        sound.root().set_valign(Align::Center);
+        sound_label.set_mnemonic_widget(Some(sound.root()));
+        sound_row.append(&sound_label);
+        sound_row.append(sound.root());
+
+        let custom_sound_row = gtk4::Box::new(Orientation::Horizontal, 8);
+        custom_sound_row.add_css_class(classes::DND_ROW);
+        custom_sound_row.set_visible(false);
+        let custom_sound_path = Entry::new();
+        custom_sound_path.add_css_class(classes::NOTIFICATION_SOUND_PATH);
+        custom_sound_path.set_placeholder_text(Some("/absolute/path/to/sound"));
+        custom_sound_path
+            .set_tooltip_text(Some("Custom notification sound: absolute local file path"));
+        custom_sound_path.update_property(&[gtk4::accessible::Property::Label(
+            "Custom notification sound file",
+        )]);
+        custom_sound_path.set_hexpand(true);
+        custom_sound_path.set_width_chars(16);
+        let custom_sound_apply = Button::with_label("Apply");
+        custom_sound_apply.add_css_class(classes::NOTIFICATION_SOUND_APPLY);
+        custom_sound_apply.add_css_class(classes::DIALOG_BUTTON);
+        ripple::install(&custom_sound_apply);
+        custom_sound_row.append(&custom_sound_path);
+        custom_sound_row.append(&custom_sound_apply);
+
         root.append(&header);
         root.append(&scroll);
         root.append(&empty);
         root.append(&dnd_row);
+        root.append(&sound_row);
+        root.append(&custom_sound_row);
 
         let column = Rc::new(Self {
             root,
@@ -165,6 +231,11 @@ impl Column {
             scroll,
             empty,
             dnd,
+            sound,
+            custom_sound_row,
+            custom_sound_path,
+            custom_sound_apply,
+            sound_preferences: RefCell::new(None),
             syncing: Rc::new(Cell::new(false)),
             on_screen: Cell::new(false),
             ages: RefCell::new(Vec::new()),
@@ -193,6 +264,46 @@ impl Column {
             }
         });
 
+        column.sound.connect_selected({
+            let weak = Rc::downgrade(&column);
+            move |selected| {
+                let Some(column) = weak.upgrade() else {
+                    return;
+                };
+                if !column.syncing.get() {
+                    let sound = SOUND_CHOICES
+                        .get(selected as usize)
+                        .map_or(NotificationSound::Off, |(_, sound)| *sound);
+                    column
+                        .custom_sound_row
+                        .set_visible(sound == NotificationSound::Custom);
+                    if sound == NotificationSound::Custom {
+                        column.custom_sound_path.grab_focus();
+                    } else {
+                        let handle = column.services.notifications.handle().clone();
+                        bridge::act(SCOPE, async move { handle.set_sound(sound).await });
+                    }
+                }
+            }
+        });
+
+        column.custom_sound_apply.connect_clicked({
+            let weak = Rc::downgrade(&column);
+            move |_| {
+                if let Some(column) = weak.upgrade() {
+                    column.apply_custom_sound();
+                }
+            }
+        });
+        column.custom_sound_path.connect_activate({
+            let weak = Rc::downgrade(&column);
+            move |_| {
+                if let Some(column) = weak.upgrade() {
+                    column.apply_custom_sound();
+                }
+            }
+        });
+
         let binding = bridge::bind_state(&column.root, services.notifications.state(), {
             let column = Rc::downgrade(&column);
             move |_, state| {
@@ -204,6 +315,12 @@ impl Column {
         *column.binding.borrow_mut() = Some(binding);
 
         column
+    }
+
+    fn apply_custom_sound(&self) {
+        let path = self.custom_sound_path.text().to_string();
+        let handle = self.services.notifications.handle().clone();
+        bridge::act(SCOPE, async move { handle.set_custom_sound(path).await });
     }
 
     /// The widget to put in the panel's left column.
@@ -251,6 +368,22 @@ impl Column {
         self.syncing.set(true);
         if self.dnd.is_active() != state.dnd {
             self.dnd.set_active(state.dnd);
+        }
+        let mut preferences = self.sound_preferences.borrow_mut();
+        if preferences
+            .as_ref()
+            .is_none_or(|(sound, path)| *sound != state.sound || *path != state.custom_sound_path)
+        {
+            let selected = SOUND_CHOICES
+                .iter()
+                .position(|(_, sound)| *sound == state.sound)
+                .unwrap_or(0) as u32;
+            self.sound.set_selected(selected);
+            self.custom_sound_row
+                .set_visible(state.sound == NotificationSound::Custom);
+            self.custom_sound_path
+                .set_text(state.custom_sound_path.as_deref().unwrap_or_default());
+            *preferences = Some((state.sound, state.custom_sound_path.clone()));
         }
         self.syncing.set(false);
 
