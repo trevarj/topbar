@@ -1424,6 +1424,34 @@ if wait_for_marker "$SMOKE_WALLPAPER_GATE/search.ready" "Wallhaven search gate";
     fail=1
   fi
   touch "$SMOKE_WALLPAPER_GATE/search.release"
+  if wait_for_marker "$SMOKE_WALLPAPER_GATE/search.first.ready" "first streamed Wallhaven row"; then
+    first_rows=0
+    first_attempt=0
+    while [ "$first_attempt" -lt 20 ]; do
+      PICKER_LOG="$art/wallpaper-tabs.stderr" PICKER_PREFIX=chooser-dump picker_dump || break
+      first_rows=$(PICKER_LOG="$art/wallpaper-tabs.stderr" PICKER_PREFIX=chooser-dump \
+        picker_read count "GtkButton chooser-result") || break
+      [ "$first_rows" -eq 1 ] && break
+      sleep 0.1
+      first_attempt=$((first_attempt + 1))
+    done
+    if [ "$first_rows" -ne 1 ]; then
+      echo "first Wallhaven row was not rendered before provider completion" >&2
+      fail=1
+    fi
+    PICKER_LOG="$art/wallpaper-tabs.stderr" PICKER_PREFIX=chooser-dump \
+      check picker_read disabled Apply
+    searching_labels=$(PICKER_LOG="$art/wallpaper-tabs.stderr" PICKER_PREFIX=chooser-dump \
+      picker_read count "GtkLabel chooser-subtitle | Searching Wallhaven…") || searching_labels=0
+    if [ "$searching_labels" -ne 1 ]; then
+      echo "loading status disappeared while streamed Wallhaven rows were arriving" >&2
+      fail=1
+    fi
+    snap wallpaper-tabs-first-result 2
+  else
+    fail=1
+  fi
+  touch "$SMOKE_WALLPAPER_GATE/search.finish.release"
   check shot wallpaper-tabs-results topbar-chooser
   results_bounds=$(wallpaper_dialog_bounds "$art/wallpaper-tabs-results.png") || fail=1
   if [ "$results_bounds" != "$tabbed_bounds" ]; then

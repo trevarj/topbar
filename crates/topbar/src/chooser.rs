@@ -7,9 +7,9 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -484,6 +484,88 @@ fn provider_command(executable: &Path, args: &[&str]) -> Result<Vec<u8>, String>
     Ok(output.stdout)
 }
 
+/// Search stdout is NDJSON, bounded across the entire stream rather than per row.
+fn read_wallhaven_rows(
+    reader: impl Read,
+    mut emit: impl FnMut(Candidate) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut reader = BufReader::new(reader.take(MAX_INPUT_BYTES + 1));
+    let mut bytes = Vec::new();
+    let mut total = 0;
+    let mut ids = HashSet::new();
+    loop {
+        bytes.clear();
+        let count = reader
+            .read_until(b'\n', &mut bytes)
+            .map_err(|error| format!("Could not read Wallhaven results: {error}"))?;
+        if count == 0 {
+            return Ok(());
+        }
+        total += count as u64;
+        if total > MAX_INPUT_BYTES {
+            return Err("Wallhaven provider response is too large".to_string());
+        }
+        let row: Candidate = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("Invalid Wallhaven results: {error}"))?;
+        validate_candidate(&row)?;
+        if !ids.insert(row.id.clone()) {
+            return Err(format!("candidate ID is duplicated: {:?}", row.id));
+        }
+        if !row.preview.as_deref().is_some_and(Path::is_absolute) {
+            return Err("Wallhaven returned a non-local preview".to_string());
+        }
+        emit(row)?;
+    }
+}
+
+fn provider_search(
+    executable: &Path,
+    preset: &str,
+    query: &str,
+    emit: impl FnMut(Candidate) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut child = Command::new(executable)
+        .args(["search", preset, query])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Could not run Wallhaven provider: {error}"))?;
+    let stdout = child.stdout.take().expect("piped provider stdout");
+    let mut stderr = child.stderr.take().expect("piped provider stderr");
+    std::thread::scope(|scope| {
+        // Retain 1200 UTF-8 bytes for 300 displayed characters; drain the rest.
+        let errors = scope.spawn(move || {
+            let mut bytes = Vec::new();
+            stderr.by_ref().take(1200).read_to_end(&mut bytes)?;
+            io::copy(&mut stderr, &mut io::sink())?;
+            Ok::<_, io::Error>(bytes)
+        });
+        let result = read_wallhaven_rows(stdout, emit);
+        if result.is_err() {
+            let _ = child.kill();
+        }
+        let status = child.wait();
+        let stderr = errors
+            .join()
+            .map_err(|error| format!("Wallhaven stderr worker failed: {error:?}"))?
+            .map_err(|error| format!("Could not read Wallhaven provider error: {error}"))?;
+        result?;
+        let status =
+            status.map_err(|error| format!("Could not wait for Wallhaven provider: {error}"))?;
+        if !status.success() {
+            return Err(format!(
+                "Wallhaven search failed: {}",
+                String::from_utf8_lossy(&stderr)
+                    .trim()
+                    .chars()
+                    .take(300)
+                    .collect::<String>()
+            ));
+        }
+        Ok(())
+    })
+}
+
 #[derive(Default)]
 struct WallpaperSearch {
     query: String,
@@ -525,14 +607,7 @@ impl WallpaperState {
         } else {
             std::mem::take(&mut self.pool)
         };
-        if !matches!(
-            (&self.pending, preset),
-            (Some(WallpaperPending::Search { preset: searching, .. }), Some(next))
-                if searching == next
-        ) && preset.is_some()
-        {
-            self.pending = None;
-        }
+        self.pending = None;
         self.generation += 1;
         true
     }
@@ -542,23 +617,30 @@ impl WallpaperState {
                 || matches!(self.pending, Some(WallpaperPending::Save { .. })))
     }
 
-    fn display_or_cache(&mut self, preset: &str, rows: Vec<Candidate>) -> Option<Vec<Candidate>> {
-        let search = self.cached.entry(preset.to_owned()).or_default();
-        search.finished = true;
-        search.error = None;
-        if self.active.as_deref() == Some(preset) {
-            Some(rows)
-        } else {
-            search.rows = rows;
-            None
+    fn append_search_row(
+        &self,
+        request: &WallpaperPending,
+        row: Candidate,
+        rows: &mut Vec<Candidate>,
+    ) -> bool {
+        if self.pending.as_ref() != Some(request) {
+            return false;
         }
+        rows.push(row);
+        true
     }
 
-    fn search_failed(&mut self, preset: &str, error: String) -> Option<String> {
+    fn finish_search(&mut self, request: &WallpaperPending, result: Result<(), String>) -> bool {
+        if !self.complete(request) {
+            return false;
+        }
+        let WallpaperPending::Search { preset, .. } = request else {
+            unreachable!("search completion");
+        };
         let search = self.cached.get_mut(preset).expect("submitted search");
         search.finished = true;
-        search.error = Some(error.clone());
-        (self.active.as_deref() == Some(preset)).then_some(error)
+        search.error = result.err();
+        true
     }
 
     fn preferred_preset(&self) -> Option<&str> {
@@ -608,6 +690,18 @@ impl WallpaperState {
             generation,
         });
         Some((preset.clone(), generation))
+    }
+
+    fn saving(&mut self, preset: String) -> u64 {
+        // Retry now belongs to this save, not a preceding partial-search error.
+        self.cached
+            .get_mut(&preset)
+            .expect("submitted search")
+            .error = None;
+        self.generation += 1;
+        let generation = self.generation;
+        self.pending = Some(WallpaperPending::Save { preset, generation });
+        generation
     }
 
     fn complete(&mut self, request: &WallpaperPending) -> bool {
@@ -894,18 +988,23 @@ fn read_candidates(provider: bool) -> Result<(Vec<Candidate>, Vec<WallpaperPrese
 fn validate_candidates(candidates: &[Candidate]) -> Result<(), String> {
     let mut ids = HashSet::with_capacity(candidates.len());
     for candidate in candidates {
-        if candidate.id.is_empty() {
-            return Err("candidate ID must not be empty".to_string());
-        }
-        if candidate.id.contains(['\n', '\r', '\0']) {
-            return Err(format!(
-                "candidate ID contains a line break or NUL: {:?}",
-                candidate.id
-            ));
-        }
+        validate_candidate(candidate)?;
         if !ids.insert(&candidate.id) {
             return Err(format!("candidate ID is duplicated: {:?}", candidate.id));
         }
+    }
+    Ok(())
+}
+
+fn validate_candidate(candidate: &Candidate) -> Result<(), String> {
+    if candidate.id.is_empty() {
+        return Err("candidate ID must not be empty".to_string());
+    }
+    if candidate.id.contains(['\n', '\r', '\0']) {
+        return Err(format!(
+            "candidate ID contains a line break or NUL: {:?}",
+            candidate.id
+        ));
     }
     Ok(())
 }
@@ -1532,7 +1631,7 @@ impl Chooser {
         self.status.set_label("");
         self.status.set_tooltip_text(None);
         self.retry.set_visible(false);
-        let (query, error, needs_search) = {
+        let (query, error, needs_search, empty) = {
             let state = self.wallpaper.borrow();
             let state = state.as_ref().expect("wallpaper state");
             let search = state.current_search();
@@ -1542,11 +1641,14 @@ impl Chooser {
                     .unwrap_or_default(),
                 search.and_then(|search| search.error.clone()),
                 state.needs_search(),
+                search.is_some_and(|search| search.finished) && self.candidates.borrow().is_empty(),
             )
         };
         self.wallhaven_query.set_text(&query);
         if let Some(error) = error {
             self.wallpaper_error(error);
+        } else if empty {
+            self.status.set_label("No Wallhaven results");
         }
         *self.selected.borrow_mut() = None;
         self.ensure_visible_selection();
@@ -1590,84 +1692,104 @@ impl Chooser {
         self.render();
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let request_preset = preset.clone();
-            let request_query = query.clone();
-            let result = gio::spawn_blocking(move || {
-                provider_command(&executable, &["search", &request_preset, &request_query])
-            })
-            .await
-            .map_err(|error| format!("Wallhaven worker failed: {error:?}"))
-            .and_then(|result| result)
-            .and_then(|bytes| {
-                serde_json::from_slice::<Vec<Candidate>>(&bytes)
-                    .map_err(|error| format!("Invalid Wallhaven results: {error}"))
-            })
-            .and_then(|rows| {
-                validate_candidates(&rows)?;
-                if rows
-                    .iter()
-                    .any(|row| !row.preview.as_deref().is_some_and(Path::is_absolute))
-                {
-                    return Err("Wallhaven returned a non-local preview".to_string());
-                }
-                Ok(rows)
+            let request = WallpaperPending::Search {
+                preset: preset.clone(),
+                query: query.clone(),
+                generation,
+            };
+            let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+            let worker = gio::spawn_blocking(move || {
+                provider_search(&executable, &preset, &query, |row| {
+                    sender
+                        .blocking_send(row)
+                        .map_err(|_| "Wallhaven search is no longer active".to_string())
+                })
             });
+            while let Some(row) = receiver.recv().await {
+                let Some(chooser) = weak.upgrade() else {
+                    return;
+                };
+                if !chooser.wallpaper_search_row(&request, row) {
+                    return;
+                }
+            }
+            let result = worker
+                .await
+                .map_err(|error| format!("Wallhaven worker failed: {error:?}"))
+                .and_then(|result| result);
             if let Some(chooser) = weak.upgrade() {
-                chooser.wallpaper_search_finished(&preset, &query, generation, result);
+                chooser.wallpaper_search_finished(&request, result);
             }
         });
     }
 
+    fn wallpaper_search_row(self: &Rc<Self>, request: &WallpaperPending, row: Candidate) -> bool {
+        if self.outcome.borrow().is_some()
+            || !self.wallpaper.borrow().as_ref().is_some_and(|state| {
+                state.append_search_row(request, row, &mut self.candidates.borrow_mut())
+            })
+        {
+            return false;
+        }
+        let index = self.candidates.borrow().len() - 1;
+        if !self.query_indices().contains(&index) {
+            if let Some(empty) = self.results.first_child().and_downcast::<Label>() {
+                empty.set_label("No matching choices");
+            }
+            return true;
+        }
+        let select_first = self.selected.borrow().is_none();
+        if select_first {
+            self.ensure_visible_selection();
+        }
+        if self.row_widgets.borrow().is_empty() {
+            while let Some(child) = self.results.first_child() {
+                self.results.remove(&child);
+            }
+        }
+        let row = self.row(index);
+        self.row_widgets.borrow_mut().push((index, row.clone()));
+        self.results.append(&row);
+        if select_first {
+            self.render_preview();
+        }
+        self.refresh_thumbnail_interests();
+        true
+    }
+
     fn wallpaper_search_finished(
         self: &Rc<Self>,
-        preset: &str,
-        query: &str,
-        generation: u64,
-        result: Result<Vec<Candidate>, String>,
+        request: &WallpaperPending,
+        result: Result<(), String>,
     ) {
         let mut state = self.wallpaper.borrow_mut();
         if self.outcome.borrow().is_some()
-            || !state.as_mut().is_some_and(|state| {
-                state.complete(&WallpaperPending::Search {
-                    preset: preset.to_string(),
-                    query: query.to_string(),
-                    generation,
-                })
-            })
+            || !state
+                .as_mut()
+                .is_some_and(|state| state.finish_search(request, result))
         {
             return;
         }
-        let result = match result {
-            Ok(rows) => state
-                .as_mut()
-                .expect("wallpaper state")
-                .display_or_cache(preset, rows)
-                .map(Ok),
-            Err(error) => state
-                .as_mut()
-                .expect("wallpaper state")
-                .search_failed(preset, error)
-                .map(Err),
-        };
+        let error = state
+            .as_ref()
+            .and_then(WallpaperState::current_search)
+            .and_then(|search| search.error.clone());
         drop(state);
-        if let Some(result) = result {
-            match result {
-                Ok(rows) => {
-                    *self.candidates.borrow_mut() = rows;
-                    self.status
-                        .set_label(if self.candidates.borrow().is_empty() {
-                            "No Wallhaven results"
-                        } else {
-                            ""
-                        });
-                    self.status.set_tooltip_text(None);
-                    self.retry.set_visible(false);
-                    *self.selected.borrow_mut() = None;
-                    self.ensure_visible_selection();
-                    self.render();
-                }
-                Err(error) => self.wallpaper_error(error),
-            }
+        if let Some(error) = error {
+            // Valid rows already shown remain usable after a partial failure.
+            self.wallpaper_error(error);
+        } else {
+            self.status
+                .set_label(if self.candidates.borrow().is_empty() {
+                    "No Wallhaven results"
+                } else {
+                    ""
+                });
+            self.status.set_tooltip_text(None);
+            self.retry.set_visible(false);
+        }
+        if self.row_widgets.borrow().is_empty() {
+            self.render();
         }
         self.update_wallpaper_controls();
     }
@@ -1683,12 +1805,7 @@ impl Chooser {
         let (executable, generation) = {
             let mut state = self.wallpaper.borrow_mut();
             let state = state.as_mut().expect("wallpaper state");
-            state.generation += 1;
-            let generation = state.generation;
-            state.pending = Some(WallpaperPending::Save {
-                preset: preset.clone(),
-                generation,
-            });
+            let generation = state.saving(preset.clone());
             (state.executable.clone(), generation)
         };
         self.retry.set_visible(false);
@@ -2217,6 +2334,10 @@ impl Chooser {
             return;
         }
         *self.outcome.borrow_mut() = Some(outcome);
+        if let Some(state) = self.wallpaper.borrow_mut().as_mut() {
+            state.pending = None;
+            state.generation += 1;
+        }
         self.thumbnail_scheduler.borrow_mut().clear();
         self.thumbnail_images.borrow_mut().clear();
         self.thumbnail_errors.borrow_mut().clear();
@@ -2239,6 +2360,7 @@ impl Chooser {
             let empty = Label::new(Some(
                 if self.wallpaper.borrow().as_ref().is_some_and(|state| {
                     state.active.is_some()
+                        && self.candidates.borrow().is_empty()
                         && matches!(state.pending, Some(WallpaperPending::Search { .. }))
                 }) {
                     "Searching Wallhaven…"
@@ -3425,6 +3547,202 @@ mod tests {
             ))
         ));
     }
+    fn stream_row(id: &str) -> String {
+        serde_json::json!({
+            "id": id, "label": "Café landscape", "preview_path": "/tmp/preview.png",
+            "tags": ["Blue Sky", "azure heavens"]
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn wallhaven_ndjson_emits_chunked_rows_before_eof() {
+        struct Chunks<'a> {
+            bytes: &'a [u8],
+            eof: Rc<Cell<bool>>,
+        }
+        impl Read for Chunks<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if self.bytes.is_empty() {
+                    self.eof.set(true);
+                    return Ok(0);
+                }
+                let count = buffer.len().min(self.bytes.len()).min(3);
+                buffer[..count].copy_from_slice(&self.bytes[..count]);
+                self.bytes = &self.bytes[count..];
+                Ok(count)
+            }
+        }
+        let bytes = format!("{}\r\n{}", stream_row("first"), stream_row("second"));
+        let eof = Rc::new(Cell::new(false));
+        let mut rows = Vec::new();
+        read_wallhaven_rows(
+            Chunks {
+                bytes: bytes.as_bytes(),
+                eof: eof.clone(),
+            },
+            |row| {
+                if rows.is_empty() {
+                    assert!(!eof.get(), "the first row must arrive before EOF");
+                }
+                rows.push(row);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(eof.get());
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+        assert_eq!(rows[0].tags, ["Blue Sky", "azure heavens"]);
+        let mut emitted = false;
+        read_wallhaven_rows(&b""[..], |_| {
+            emitted = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(!emitted, "empty stdout is a successful empty search");
+    }
+
+    #[test]
+    fn wallhaven_ndjson_bounds_the_whole_stream() {
+        let mut bytes = format!("{}\n{}", stream_row("first"), stream_row("second")).into_bytes();
+        bytes.resize(MAX_INPUT_BYTES as usize - 1, b' ');
+        bytes.push(b'\n');
+        let mut count = 0;
+        read_wallhaven_rows(bytes.as_slice(), |_| {
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, 2);
+        bytes.insert(bytes.len() - 1, b' ');
+        count = 0;
+        let error = read_wallhaven_rows(bytes.as_slice(), |_| {
+            count += 1;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error.contains("too large"));
+        assert_eq!(
+            count, 1,
+            "a row exceeding the total bound must not be published"
+        );
+    }
+
+    #[test]
+    fn wallhaven_ndjson_rejects_bad_rows_without_losing_valid_prefix() {
+        let invalid = [
+            (stream_row("first"), "duplicated"),
+            (stream_row(""), "must not be empty"),
+            (stream_row("bad\nid"), "line break or NUL"),
+            (stream_row("bad\rid"), "line break or NUL"),
+            (stream_row("bad\0id"), "line break or NUL"),
+            (
+                r#"{"id":"next","label":"Next","preview":"relative.png"}"#.into(),
+                "non-local preview",
+            ),
+            (
+                r#"{"id":"next","label":"Next"}"#.into(),
+                "non-local preview",
+            ),
+            (
+                r#"{"id":"next","label":"Next","preview":"/tmp/a","tags":[42]}"#.into(),
+                "Invalid Wallhaven",
+            ),
+            ("{malformed".into(), "Invalid Wallhaven"),
+            ("[]".into(), "Invalid Wallhaven"),
+            (String::new(), "Invalid Wallhaven"),
+        ];
+        for (bad, expected) in invalid {
+            let bytes = format!("{}\n{bad}\n", stream_row("first"));
+            let mut rows = Vec::new();
+            let error = read_wallhaven_rows(bytes.as_bytes(), |row| {
+                rows.push(row);
+                Ok(())
+            })
+            .unwrap_err();
+            assert!(error.contains(expected), "{error}");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].id, "first");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wallhaven_worker_streams_drains_stderr_and_checks_process_exit() {
+        use std::os::unix::fs::PermissionsExt;
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("topbar-provider-{}-{unique}", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+        let executable = directory.join("provider");
+        let acknowledged = directory.join("row-observed");
+        let shell = std::env::split_paths(&std::env::var_os("PATH").expect("test shell PATH"))
+            .map(|directory| directory.join("sh"))
+            .find(|path| path.is_file())
+            .expect("sh on test shell PATH")
+            .canonicalize()
+            .expect("absolute test shell path");
+        fs::write(&executable, format!(r#"#!{}
+if [ "$3" = empty ]; then exit 0; fi
+printf '%s\n' '{}'
+i=0
+while [ ! -f "$2" ]; do
+  i=$((i + 1))
+  [ "$i" -lt 100 ] || exit 8
+  sleep 0.01
+done
+exec 1>&-
+if [ "$3" = error ]; then
+  i=0
+  while [ "$i" -lt 2048 ]; do
+    printf '%s\n' 'rate limit: a provider can fill the stderr pipe after stdout EOF; drain it concurrently' >&2
+    i=$((i + 1))
+  done
+  exit 7
+fi
+"#, shell.display(), stream_row("first"))).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        for query in ["success", "error"] {
+            let mut rows = Vec::new();
+            let result =
+                provider_search(&executable, acknowledged.to_str().unwrap(), query, |row| {
+                    rows.push(row);
+                    fs::write(&acknowledged, b"observed while provider waits").unwrap();
+                    Ok(())
+                });
+            assert_eq!(rows.len(), 1, "{query} provider result: {result:?}");
+            if query == "error" {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .starts_with("Wallhaven search failed: rate limit")
+                );
+            } else {
+                result.unwrap();
+            }
+            fs::remove_file(&acknowledged).unwrap();
+        }
+        provider_search(&executable, "", "empty", |_| {
+            panic!("empty provider emitted a row")
+        })
+        .unwrap();
+        let error = provider_search(
+            &executable,
+            acknowledged.to_str().unwrap(),
+            "cancel",
+            |_| Err("receiver closed".into()),
+        )
+        .unwrap_err();
+        assert_eq!(error, "receiver closed");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn wallpaper_tabs_defer_search_cache_results_and_ignore_late_searches() {
         let mut state = WallpaperState {
@@ -3447,201 +3765,183 @@ mod tests {
             generation: 0,
         };
         let mut rows = vec![candidate("pool", "Local", None)];
-        assert_eq!(state.searching(String::new()), None, "Pool never searches");
+        assert_eq!(state.searching(String::new()), None, "Local never searches");
         assert!(state.switch(Some("nature"), &mut rows));
         assert!(rows.is_empty());
-        let (_, first) = state
-            .searching(String::new())
-            .expect("first Wallhaven activation searches");
+        assert!(state.needs_search());
+        state.searching(String::new()).unwrap();
+        let first = state.pending.clone().unwrap();
         assert!(state.blocks_selection());
-        assert!(
-            state.switch(None, &mut rows),
-            "Pool remains accessible during search"
-        );
-        assert_eq!(rows[0].id, "pool");
-        assert!(!state.blocks_selection(), "Pool stays actionable");
-        assert!(matches!(
-            state.pending,
-            Some(WallpaperPending::Search { .. })
-        ));
-        assert!(state.switch(Some("nature"), &mut rows));
-        assert!(rows.is_empty());
-        assert!(
-            state.blocks_selection(),
-            "returning to a pending search shows the spinner"
-        );
         assert_eq!(
             state.searching(String::new()),
             None,
-            "reentry must not launch a duplicate"
+            "no duplicate in-flight query"
+        );
+        assert!(state.append_search_row(&first, candidate("first", "Blue Sky", None), &mut rows));
+        assert!(
+            !state.current_search().unwrap().finished,
+            "rows do not complete a search"
+        );
+        assert!(
+            state.blocks_selection(),
+            "Apply stays disabled while rows arrive"
         );
         assert!(state.switch(None, &mut rows));
-        assert!(state.complete(&WallpaperPending::Search {
-            preset: "nature".into(),
-            query: String::new(),
-            generation: first
-        }));
-        assert!(
-            state
-                .display_or_cache("nature", vec![candidate("9d82vk", "Fetched", None)])
-                .is_none()
-        );
-        assert_eq!(
-            rows[0].id, "pool",
-            "completed search must not replace Pool rows"
-        );
+        assert_eq!(rows[0].id, "pool");
         assert!(!state.blocks_selection());
+        assert!(!state.append_search_row(&first, candidate("stale", "Stale", None), &mut rows));
+        assert!(!state.finish_search(&first, Err("stale failure".into())));
         assert!(state.switch(Some("nature"), &mut rows));
-        assert_eq!(rows[0].id, "9d82vk", "return uses cached results");
-        assert!(!state.blocks_selection());
-        state.pending = Some(WallpaperPending::Save {
-            preset: "nature".into(),
-            generation: first,
-        });
         assert!(
-            !state.switch(None, &mut rows),
-            "save disables Pool and Cancel until complete"
+            state.needs_search(),
+            "a superseded partial search restarts on reentry"
         );
+        state.searching(String::new()).unwrap();
+        rows.clear();
+        let current = state.pending.clone().unwrap();
+        assert!(!state.append_search_row(&first, candidate("stale", "Stale", None), &mut rows));
+        assert!(state.append_search_row(&current, candidate("one", "Blue Sky", None), &mut rows));
+        let filter = "sky";
+        let mut selected = retained_selection(&rows, &matching_indices(&rows, filter), None);
+        assert_eq!(selected.as_deref(), Some("one"));
+        assert!(state.append_search_row(&current, candidate("two", "Blue Sky", None), &mut rows));
+        selected = retained_selection(&rows, &matching_indices(&rows, filter), Some("two"));
+        assert!(state.append_search_row(&current, candidate("three", "Blue Sky", None), &mut rows));
+        selected = retained_selection(&rows, &matching_indices(&rows, filter), selected.as_deref());
+        assert_eq!(
+            selected.as_deref(),
+            Some("two"),
+            "arrival retains the chosen original ID"
+        );
+        let no_matches = matching_indices(&rows, "nebula");
+        assert!(no_matches.is_empty());
+        assert!(state.append_search_row(&current, candidate("four", "Nebula", None), &mut rows));
+        assert_eq!(
+            retained_selection(&rows, &matching_indices(&rows, "nebula"), None).as_deref(),
+            Some("four")
+        );
+        assert!(state.finish_search(&current, Ok(())));
+        assert!(!state.blocks_selection());
+        assert_eq!(
+            selected.as_deref(),
+            Some("two"),
+            "EOF does not reset selection"
+        );
+        assert!(state.switch(None, &mut rows));
+        assert!(state.switch(Some("nature"), &mut rows));
+        assert_eq!(rows.len(), 4, "completed rows are cached");
+        assert!(!state.needs_search());
+
+        state.saving("nature".into());
+        let save = state.pending.clone().unwrap();
+        assert!(!state.switch(None, &mut rows));
         assert_eq!(
             state.searching("+new query".into()),
             None,
-            "saving blocks query submission"
+            "save blocks submission"
         );
-        assert!(
-            matches!(state.pending, Some(WallpaperPending::Save { .. })),
-            "save keeps its spinner while the provider is running"
-        );
-        assert!(state.complete(&WallpaperPending::Save {
-            preset: "nature".into(),
-            generation: first
-        }));
-        assert_eq!(state.active.as_deref(), Some("nature"));
+        assert!(state.complete(&save));
         assert!(state.switch(Some("mountains"), &mut rows));
         assert!(rows.is_empty());
-        let (_, superseded) = state.searching(String::new()).expect("new preset searches");
-        assert!(state.switch(Some("nature"), &mut rows));
-        assert_eq!(rows[0].id, "9d82vk");
-        assert!(!state.complete(&WallpaperPending::Search {
-            preset: "mountains".into(),
-            query: String::new(),
-            generation: superseded
-        }));
-        assert_eq!(
-            rows[0].id, "9d82vk",
-            "stale search cannot clobber current rows"
-        );
-        assert!(state.switch(Some("mountains"), &mut rows));
-        let (_, current) = state
-            .searching(String::new())
-            .expect("superseded preset searches on reentry");
-        assert!(!state.complete(&WallpaperPending::Search {
-            preset: "mountains".into(),
-            query: String::new(),
-            generation: superseded
-        }));
+        state
+            .searching("+nature -car @someone type:png".into())
+            .unwrap();
+        let old_query = state.pending.clone().unwrap();
+        state.searching("like:9d82vk".into()).unwrap();
+        let latest = state.pending.clone().unwrap();
+        assert!(!state.append_search_row(&old_query, candidate("stale", "Stale", None), &mut rows));
+        assert!(!state.finish_search(&old_query, Err("old query error".into())));
+        if let WallpaperPending::Search {
+            preset, generation, ..
+        } = &latest
+        {
+            let wrong_query = WallpaperPending::Search {
+                preset: preset.clone(),
+                query: "wrong".into(),
+                generation: *generation,
+            };
+            assert!(!state.append_search_row(
+                &wrong_query,
+                candidate("wrong", "Wrong", None),
+                &mut rows
+            ));
+            assert!(!state.finish_search(&wrong_query, Ok(())));
+        }
         assert!(
             state.blocks_selection(),
             "stale completion cannot hide the spinner"
         );
-        assert!(state.complete(&WallpaperPending::Search {
-            preset: "mountains".into(),
-            query: String::new(),
-            generation: current
-        }));
-        rows = state
-            .display_or_cache("mountains", vec![candidate("mountain", "Mountain", None)])
-            .expect("active preset displays results");
+        assert!(state.append_search_row(&latest, candidate("partial", "Partial", None), &mut rows));
+        assert!(state.finish_search(&latest, Err("HTTP 429".into())));
+        assert_eq!(
+            rows[0].id, "partial",
+            "valid partial results survive failure"
+        );
+        assert_eq!(state.retry_query(), Some("like:9d82vk"));
+        assert!(!state.needs_search(), "errors require explicit retry");
         assert!(state.switch(None, &mut rows));
+        assert_eq!(rows[0].id, "pool", "remote queries never replace Local");
         assert_eq!(state.preferred_preset(), Some("mountains"));
-        let preset = state.preferred_preset().unwrap().to_owned();
-        assert!(state.switch(Some(&preset), &mut rows));
-        assert_eq!(rows[0].id, "mountain", "last preset uses cached results");
-        let query_a = "+nature -car @someone type:png".to_string();
-        let query_b = "like:9d82vk".to_string();
-        let (_, first_query) = state.searching(query_a.clone()).expect("submit query A");
-        rows.clear();
-        assert!(
-            state.blocks_selection(),
-            "old results cannot be saved during a new query"
-        );
-        let (_, latest_query) = state
-            .searching(query_b.clone())
-            .expect("query B supersedes A");
-        assert!(!state.complete(&WallpaperPending::Search {
-            preset: "mountains".into(),
-            query: query_a.clone(),
-            generation: first_query,
-        }));
-        assert!(
-            !state.complete(&WallpaperPending::Search {
-                preset: "mountains".into(),
-                query: query_a,
-                generation: latest_query,
-            }),
-            "a different query cannot complete the latest request"
-        );
-        assert!(state.blocks_selection());
-        assert!(state.complete(&WallpaperPending::Search {
-            preset: "mountains".into(),
-            query: query_b.clone(),
-            generation: latest_query,
-        }));
-        rows = state
-            .display_or_cache("mountains", vec![candidate("latest", "Latest", None)])
-            .expect("latest results display");
-        assert!(state.switch(None, &mut rows));
-        assert_eq!(rows[0].id, "pool", "queries never replace Local rows");
         assert!(state.switch(Some("mountains"), &mut rows));
-        assert_eq!(rows[0].id, "latest");
-        assert_eq!(state.current_search().unwrap().query, query_b);
-        assert!(
-            !state.needs_search(),
-            "returning to results does not submit again"
-        );
-
-        let failed_query = "+nebula -people".to_string();
-        let (_, failed_generation) = state.searching(failed_query.clone()).expect("new query");
+        assert_eq!(rows[0].id, "partial");
+        let retry = state.retry_query().unwrap().to_owned();
+        state.searching(retry).unwrap();
         rows.clear();
-        assert!(state.switch(None, &mut rows));
-        assert!(state.complete(&WallpaperPending::Search {
-            preset: "mountains".into(),
-            query: failed_query.clone(),
-            generation: failed_generation,
-        }));
-        assert_eq!(state.search_failed("mountains", "HTTP 429".into()), None);
-        assert!(state.switch(Some("mountains"), &mut rows));
-        assert!(
-            rows.is_empty(),
-            "failed new query cannot revive old results"
-        );
-        assert_eq!(state.retry_query(), Some(failed_query.as_str()));
-        assert!(
-            !state.needs_search(),
-            "failed queries wait for explicit retry"
-        );
-        let retry_query = state.retry_query().unwrap().to_owned();
-        let (_, retry_generation) = state
-            .searching(retry_query.clone())
-            .expect("retry submitted query");
-        assert!(state.complete(&WallpaperPending::Search {
-            preset: "mountains".into(),
-            query: retry_query,
-            generation: retry_generation,
-        }));
-        rows = state
-            .display_or_cache("mountains", Vec::new())
-            .expect("empty query completes");
+        let request = state.pending.clone().unwrap();
+        assert!(state.finish_search(&request, Ok(())));
         assert_eq!(state.retry_query(), None);
         assert!(state.switch(None, &mut rows));
         assert!(state.switch(Some("mountains"), &mut rows));
+        assert!(rows.is_empty());
+        assert!(!state.needs_search(), "empty success is cached");
+
+        state.searching("save after partial error".into()).unwrap();
+        let partial_search = state.pending.clone().unwrap();
+        assert!(state.append_search_row(
+            &partial_search,
+            candidate("selected-partial", "Partial choice", None),
+            &mut rows
+        ));
+        assert!(state.finish_search(&partial_search, Err("HTTP 429".into())));
+        assert_eq!(state.retry_query(), Some("save after partial error"));
+        let selected = retained_selection(&rows, &[0], None);
+        state.saving("mountains".into());
+        let failed_save = state.pending.clone().unwrap();
+        assert!(
+            state.complete(&failed_save),
+            "save worker failure completes its pending request"
+        );
+        assert_eq!(
+            state.retry_query(),
+            None,
+            "Retry after a save failure must save, not search"
+        );
+        assert_eq!(
+            rows[0].id, "selected-partial",
+            "save failure retains the partial choice"
+        );
+        assert_eq!(selected.as_deref(), Some("selected-partial"));
         assert!(
             !state.needs_search(),
-            "empty results are cached, not repeatedly requested"
+            "the failed save must not restart the partial search"
+        );
+        let retry_save_generation = state.saving("mountains".into());
+        assert!(
+            matches!(&state.pending, Some(WallpaperPending::Save { preset, generation })
+            if preset == "mountains" && *generation == retry_save_generation)
+        );
+        assert!(state.complete(&state.pending.clone().unwrap()));
+
+        state.searching("closing".into()).unwrap();
+        rows.clear();
+        let closed = state.pending.clone().unwrap();
+        state.pending = None;
+        state.generation += 1;
+        assert!(!state.append_search_row(&closed, candidate("late", "Late", None), &mut rows));
+        assert!(
+            !state.finish_search(&closed, Ok(())),
+            "close invalidates late events"
         );
         assert!(rows.is_empty());
-        assert_eq!(
-            state.cached.keys().cloned().collect::<HashSet<_>>(),
-            HashSet::from(["nature".to_string(), "mountains".to_string()])
-        );
     }
 }

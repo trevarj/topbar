@@ -132,11 +132,21 @@ filters immediately; Wallhaven's query is submitted only with Enter or Search.
 selected wallpaper; Enter in the Wallhaven query never applies it.
 
 The provider protocol is `PROGRAM search PRESET QUERY` (empty QUERY uses the
-preset defaults), returning a candidate array with absolute local preview paths,
-and `PROGRAM save PRESET ID`, returning `{"path":"/absolute/saved/image"}`.
+preset defaults), streaming NDJSON: one compact candidate object per line,
+flushed as soon as its thumbnail and tags are ready. Each preview path must be
+absolute and local; candidate IDs must be unique across the stream. Search
+stdout is limited to 8 MiB total. EOF **and a successful process exit** complete
+the search; empty stdout means no results. Rows appear while the spinner stays
+active, retaining the current filter and selected ID. Apply stays disabled until
+completion. A malformed row or provider failure leaves already validated rows
+visible with an inline error and Retry; Retry clears them and resubmits the
+submitted query. Superseded query/preset events and events after close are ignored.
+The chooser caches only the latest submitted query/results per preset; leaving
+a pending search invalidates it, so returning restarts that unfinished search.
+`PROGRAM save PRESET ID` still returns `{"path":"/absolute/saved/image"}`.
+A failed save's Retry repeats the selected-image save, not an earlier search.
 Explicit queries are passed unchanged for the provider to URL-encode, preserving
-Wallhaven operators without appending preset terms. The chooser keeps only the
-latest submitted query/results per preset and retries that submitted query.
+Wallhaven operators without appending preset terms.
 Provider-mode output is `{"kind":"pool","id":"..."}` or
 `{"kind":"saved","path":"..."}`; cancellation exits 1.
 

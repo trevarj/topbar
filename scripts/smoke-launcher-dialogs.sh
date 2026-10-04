@@ -378,7 +378,7 @@ cat >"$wallpaper_json" <<JSON
 ]
 JSON
 
-# A gated provider exposes each in-dialog spinner without contacting Wallhaven.
+# A gated NDJSON provider exposes arriving rows and spinners without contacting Wallhaven.
 tabbed_json="$fixtures/wallpaper-tabs.json"
 cat >"$tabbed_json" <<JSON
 {"pool":[{"id":"valid","label":"Golden horizon","preview_path":"$fixtures/wallpaper-valid.png"}],
@@ -402,8 +402,14 @@ case "$1:$2" in
       touch "$SMOKE_WALLPAPER_GATE/query.ready"
       while [ ! -f "$SMOKE_WALLPAPER_GATE/query.release" ]; do sleep 0.1; done
     fi
-    printf '[{"id":"9d82vk","label":"Wallhaven Nature / 9d82vk","tags":["Blue Sky"],"preview_path":"%s"},{"id":"ab12cd","label":"Wallhaven Nature / ab12cd","tags":["solar nebula","stellar clouds"],"preview_path":"%s"}]\n' \
-      "$SMOKE_WALLPAPER_IMAGE" "$SMOKE_WALLPAPER_IMAGE"
+    printf '{"id":"9d82vk","label":"Wallhaven Nature / 9d82vk","tags":["Blue Sky"],"preview_path":"%s"}\n' \
+      "$SMOKE_WALLPAPER_IMAGE"
+    if [ -z "$3" ]; then
+      printf 'first row emitted\n' >"$SMOKE_WALLPAPER_GATE/search.first.ready"
+      while [ ! -f "$SMOKE_WALLPAPER_GATE/search.finish.release" ]; do sleep 0.1; done
+    fi
+    printf '{"id":"ab12cd","label":"Wallhaven Nature / ab12cd","tags":["solar nebula","stellar clouds"],"preview_path":"%s"}\n' \
+      "$SMOKE_WALLPAPER_IMAGE"
     ;;
   save:nature)
     [ "$#" -eq 3 ] && [ "$3" = ab12cd ] || exit 2
