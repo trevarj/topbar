@@ -1431,7 +1431,12 @@ if wait_for_marker "$SMOKE_WALLPAPER_GATE/search.ready" "Wallhaven search gate";
       PICKER_LOG="$art/wallpaper-tabs.stderr" PICKER_PREFIX=chooser-dump picker_dump || break
       first_rows=$(PICKER_LOG="$art/wallpaper-tabs.stderr" PICKER_PREFIX=chooser-dump \
         picker_read count "GtkButton chooser-result") || break
-      [ "$first_rows" -eq 1 ] && break
+      # Apply becoming sensitive also proves the selected preview has decoded.
+      if [ "$first_rows" -eq 1 ] && \
+        PICKER_LOG="$art/wallpaper-tabs.stderr" PICKER_PREFIX=chooser-dump \
+          picker_read enabled "GtkButton | Apply" 2>/dev/null; then
+        break
+      fi
       sleep 0.1
       first_attempt=$((first_attempt + 1))
     done
@@ -1440,7 +1445,7 @@ if wait_for_marker "$SMOKE_WALLPAPER_GATE/search.ready" "Wallhaven search gate";
       fail=1
     fi
     PICKER_LOG="$art/wallpaper-tabs.stderr" PICKER_PREFIX=chooser-dump \
-      check picker_read disabled Apply
+      check picker_read enabled "GtkButton | Apply"
     searching_labels=$(PICKER_LOG="$art/wallpaper-tabs.stderr" PICKER_PREFIX=chooser-dump \
       picker_read count "GtkLabel chooser-subtitle | Searching Wallhaven…") || searching_labels=0
     if [ "$searching_labels" -ne 1 ]; then

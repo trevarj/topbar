@@ -612,9 +612,7 @@ impl WallpaperState {
         true
     }
     fn blocks_selection(&self) -> bool {
-        self.pending.is_some()
-            && (self.active.is_some()
-                || matches!(self.pending, Some(WallpaperPending::Save { .. })))
+        matches!(self.pending, Some(WallpaperPending::Save { .. }))
     }
 
     fn append_search_row(
@@ -1594,7 +1592,7 @@ impl Chooser {
                 button.add_css_class(classes::DIALOG_BUTTON_PRIMARY);
             }
         }
-        if state.blocks_selection() {
+        if state.pending.is_some() {
             self.spinner.set_visible(true);
             self.spinner.start();
             self.status.set_tooltip_text(None);
@@ -1609,7 +1607,7 @@ impl Chooser {
             self.spinner.set_visible(false);
         }
         self.status_row.set_visible(
-            active.is_some() && (state.blocks_selection() || !self.status.label().is_empty()),
+            active.is_some() && (state.pending.is_some() || !self.status.label().is_empty()),
         );
         drop(wallpaper_state);
         self.update_apply_sensitivity();
@@ -3771,7 +3769,7 @@ fi
         assert!(state.needs_search());
         state.searching(String::new()).unwrap();
         let first = state.pending.clone().unwrap();
-        assert!(state.blocks_selection());
+        assert!(!state.blocks_selection());
         assert_eq!(
             state.searching(String::new()),
             None,
@@ -3783,8 +3781,8 @@ fi
             "rows do not complete a search"
         );
         assert!(
-            state.blocks_selection(),
-            "Apply stays disabled while rows arrive"
+            !state.blocks_selection(),
+            "search does not block Apply once its selected preview is ready"
         );
         assert!(state.switch(None, &mut rows));
         assert_eq!(rows[0].id, "pool");
@@ -3834,6 +3832,7 @@ fi
 
         state.saving("nature".into());
         let save = state.pending.clone().unwrap();
+        assert!(state.blocks_selection(), "save blocks Apply");
         assert!(!state.switch(None, &mut rows));
         assert_eq!(
             state.searching("+new query".into()),
@@ -3868,7 +3867,7 @@ fi
             assert!(!state.finish_search(&wrong_query, Ok(())));
         }
         assert!(
-            state.blocks_selection(),
+            state.pending.as_ref() == Some(&latest),
             "stale completion cannot hide the spinner"
         );
         assert!(state.append_search_row(&latest, candidate("partial", "Partial", None), &mut rows));
@@ -3894,6 +3893,44 @@ fi
         assert!(state.switch(Some("mountains"), &mut rows));
         assert!(rows.is_empty());
         assert!(!state.needs_search(), "empty success is cached");
+
+        state.searching("save before EOF".into()).unwrap();
+        let streaming_search = state.pending.clone().unwrap();
+        assert!(state.append_search_row(
+            &streaming_search,
+            candidate("streamed-choice", "Streamed choice", None),
+            &mut rows
+        ));
+        let selected = retained_selection(&rows, &[0], None);
+        assert!(!state.blocks_selection(), "streamed choices can be applied");
+        state.saving("mountains".into());
+        let streaming_save = state.pending.clone().unwrap();
+        assert!(state.blocks_selection(), "save blocks another Apply");
+        assert!(!state.append_search_row(
+            &streaming_search,
+            candidate("late", "Late", None),
+            &mut rows
+        ));
+        assert!(!state.finish_search(&streaming_search, Ok(())));
+        assert!(!state.finish_search(&streaming_search, Err("late failure".into())));
+        assert_eq!(
+            state.pending.as_ref(),
+            Some(&streaming_save),
+            "late search rows, EOF and errors cannot clear the save"
+        );
+        assert!(state.blocks_selection());
+        assert_eq!(rows.len(), 1, "late rows cannot replace the saved choice");
+        assert_eq!(rows[0].id, "streamed-choice");
+        assert_eq!(selected.as_deref(), Some("streamed-choice"));
+        assert!(!state.current_search().unwrap().finished);
+        assert_eq!(
+            state.retry_query(),
+            None,
+            "late errors cannot expose search Retry"
+        );
+        assert!(state.complete(&streaming_save));
+        assert!(!state.blocks_selection());
+        rows.clear();
 
         state.searching("save after partial error".into()).unwrap();
         let partial_search = state.pending.clone().unwrap();

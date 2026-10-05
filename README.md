@@ -137,10 +137,12 @@ flushed as soon as its thumbnail and tags are ready. Each preview path must be
 absolute and local; candidate IDs must be unique across the stream. Search
 stdout is limited to 8 MiB total. EOF **and a successful process exit** complete
 the search; empty stdout means no results. Rows appear while the spinner stays
-active, retaining the current filter and selected ID. Apply stays disabled until
-completion. A malformed row or provider failure leaves already validated rows
-visible with an inline error and Retry; Retry clears them and resubmits the
-submitted query. Superseded query/preset events and events after close are ignored.
+active, retaining the current filter and selected ID. Apply is enabled once the
+selected preview has decoded, even while search is still streaming; applying
+supersedes that search with the selected-image save. A malformed row or provider
+failure leaves already validated rows visible with an inline error and Retry;
+Retry clears them and resubmits the submitted query. Superseded query/preset
+events and events after close are ignored.
 The chooser caches only the latest submitted query/results per preset; leaving
 a pending search invalidates it, so returning restarts that unfinished search.
 `PROGRAM save PRESET ID` still returns `{"path":"/absolute/saved/image"}`.

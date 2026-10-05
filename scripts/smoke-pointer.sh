@@ -294,6 +294,8 @@ elif mode == "labels":
     print(json.dumps([row[3] for row in rows]))
 elif mode == "disabled":
     assert any("sensitive=false" in row[8] for row in rows), f"no disabled {pattern}"
+elif mode == "enabled":
+    assert any("sensitive=true" in row[8] for row in rows), f"no enabled {pattern}"
 elif mode == "query":
     expected = sys.argv[5]
     assert any(row[3] == pattern + " · " + expected for row in rows), f"{pattern}: expected query {expected!r}"
