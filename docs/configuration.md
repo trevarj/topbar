@@ -69,10 +69,53 @@ configuration, so it is a config file as well as a report.
 
 ## Coming from v1
 
-v1 configuration files load unchanged. That is a tested contract, not an
-intention: `crates/topbar-core/tests/fixtures/live-config.toml` is a
-byte-for-byte copy of a real v1 file, and a test fails if loading it produces
-any warning at all.
+The checked-in `crates/topbar-core/tests/fixtures/live-config.toml` is a
+byte-for-byte copy of the v1 configuration this project targets.
+`live_config_contract.rs` regression-tests that this file parses and validates
+unchanged without warnings, and checks selected settings. That is not a promise
+that every v1 file works unchanged: removed features stay removed, legacy
+shapes and values can warn, and bottom placement is an error.
+
+v2 is a ground-up rewrite and a rename. Before switching:
+
+1. **Stop v1 first.** Both versions take `org.freedesktop.Notifications` with
+   `ReplaceExisting`, so whichever starts last owns notifications and the other
+   silently stops receiving them. Remove the old
+   `spawn-at-startup "gnome-topbar"` line from niri's `config.kdl` and stop the
+   running panel before starting topbar.
+2. **Update every niri `layer-rule`.** All four layer-shell namespaces lost
+   the prefix: `gnome-topbar` becomes `topbar`, `gnome-topbar-popover` becomes
+   `topbar-popover`, `gnome-topbar-toast` becomes `topbar-toast`, and
+   `gnome-topbar-tooltip` becomes `topbar-tooltip`. A rule matching
+   `^gnome-topbar$` no longer matches, including rules that enable blur.
+3. **Update key binds and the package.** Every `spawn "gnome-topbar" …`
+   becomes `spawn "topbar" …`, and `pkgs.gnome-topbar` becomes `pkgs.topbar`.
+4. **Move the config when convenient.** Legacy config paths still load with a
+   one-line relocation notice; an explicit `--config PATH` never prints that
+   notice. See [Where the file lives](#where-the-file-lives) for lookup order
+   and the current paths.
+5. **Check `[updates] update_count_command`.** Distribution detection supplies
+   a read-only count for Guix, Debian, Arch, Fedora, Fedora's image-based
+   editions and NixOS. An old override still wins outright and hides the card
+   if it fails, so remove it unless intended. On NixOS, set `flake` if the
+   system flake is not at `/etc/nixos`; counting re-locks a scratch copy and
+   never writes the real `flake.lock`. See [`[updates]`](#updates) for the
+   counting commands and override contract.
+6. **Optionally replace `custom-crypto` with `crypto`.** The built-in widget
+   prices coins without a shell script, `curl` or `jq`, and its popover edits
+   the coin list without touching the config. Keeping the existing script is
+   supported; the `custom-*` engine remains available.
+7. **Account for removed features.** Material You and GTK-following theme
+   mode, wallpaper colour extraction, the Material Symbols icon font, the
+   outline system, widget groups, the `outputs` allowlist, bottom placement,
+   cellular, MPD and the cava visualiser are no longer supported. Legacy keys
+   do not restore these features; the compatibility handling and bottom-bar
+   error are described below.
+8. **Runtime state moves itself.** On first start,
+   `$XDG_STATE_HOME/gnome-topbar/` is renamed to `$XDG_STATE_HOME/topbar/`
+   unless the new directory already exists. The runtime socket and lock are
+   `$XDG_RUNTIME_DIR/topbar.sock` and `$XDG_RUNTIME_DIR/topbar.lock`; environment
+   variables use `TOPBAR_*`.
 
 Keys whose feature was removed in the rewrite are accepted and produce a
 *specific* explanation rather than a generic "unknown option". The table is
@@ -142,7 +185,7 @@ choices to what the config file says.
 | `padding` | integer | `0` | Extra vertical padding inside the bar. |
 | `border_radius` | integer | `0` | Bar corner radius, in pixels. |
 | `popover_offset` | integer | `1` | Gap between the bar and popovers anchored to it. |
-| `background_color` | hex string | `"#000000"` | Bar background colour. |
+| `background_color` | hex string | unset | Bar background colour. Unset inherits `theme.palette.background`. |
 | `background_opacity` | float | `1.0` | Bar background opacity, `0.0`–`1.0`. |
 
 `position = "bottom"` is a hard error: v2 draws a GNOME Shell-style top panel
@@ -152,6 +195,17 @@ changing it rebuilds the windows rather than resizing them.
 
 `popover_offset` is the only gap the panel adds under the bar; the compositor's
 own exclusive-zone arithmetic supplies the rest.
+
+## `[launcher]`
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `file_roots` | array of paths | `["~"]` | Directories searched for files; `~` expands to the user's home directory. |
+| `file_exclusions` | array of strings | `[]` | Additional `fd` exclusion patterns for directories or files. |
+
+`file_roots` must contain at least one root, and individual roots must not be
+empty. Exclusion patterns must not be empty either; the exclusions array itself
+may be empty. These settings configure file search, not application filters.
 
 ## `[widgets]`
 
@@ -165,8 +219,8 @@ arrays, and it appears in the order it is written.
 | `right` | array of strings | `["tray", "quick_settings"]` | Right section, in order. |
 
 The accepted names are `workspaces`, `clock`, `weather`, `crypto`, `tray`,
-`quick_settings`, `system_monitor`, `headset`, `keyboard_layout`, `os_logo`, and
-any number of `custom-<name>` script widgets. An unrecognised name warns and is
+`quick_settings`, `system_monitor`, `headset`, `keyboard_layout`, `notmuch`,
+`os_logo`, and any number of `custom-<name>` script widgets. An unrecognised name warns and is
 skipped rather than failing the load. A `[widgets.<name>]` table for a widget
 that is not placed anywhere also warns — options that will never be read are
 almost always a typo in the placement array.
@@ -186,6 +240,9 @@ button is a full pill; below that the radius is `bar.size * percent / 100`,
 capped at half the bar height. The default opacity of `0.0` is what makes panel
 buttons invisible until they are hovered, which is how GNOME Shell's panel
 behaves.
+
+The launcher uses the same background colour and opacity as the control center,
+whether compositor blur is enabled or not.
 
 ### Click commands
 
@@ -245,14 +302,6 @@ Hovering the clock shows the full local date and a passive mini calendar of the
 current month, with today selected. It follows the clock across midnight and
 resume, and works with `control_panel = false` without starting panel services.
 `world_clocks` does not change the clock's local date.
-
-The display-dependent GTK regression checks can run on a real display or under
-Xvfb (`xvfb-run` must be available; each command gets a fresh GTK process):
-
-```sh
-nix develop -c env GDK_BACKEND=x11 xvfb-run -a cargo test -p topbar widgets::clock::tests::calendar_tooltip_tracks_local_date_rollover -- --ignored --exact
-nix develop -c env GDK_BACKEND=x11 xvfb-run -a cargo test -p topbar surfaces::tooltip::gtk_tests::text_tooltip_replaces_calendar_content -- --ignored --exact
-```
 
 `control_panel = true` is what makes the clock draw a GNOME date menu, and it
 is also what asks for the weather and media services — the panel's forecast
@@ -363,8 +412,10 @@ icon that arrives is the icon that is shown rather than one scaled afterwards.
 
 ## `[widgets.quick_settings]`
 
-Every key is a row in the menu, and every one defaults to on. Set one to
-`false` to hide that row.
+The boolean visibility switches default to `true`; set one to `false` to hide
+its row, card, or indicator. `mic` instead controls when the microphone slider
+appears, while `vpn_close_on_connect` and `audio_scroll_percentage` change
+interaction rather than visibility.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
@@ -673,3 +724,21 @@ arrays for the theme and wallpaper choosers. When configured, Quick Settings
 shows centered icon-and-label buttons named **Theme** and **Wallpaper**, using
 Adwaita's theme and image symbolic icons. Each button is hidden when its command
 is absent; activating it closes Quick Settings and runs the configured command.
+
+## Picker keyboard interaction
+
+Pickers support fuzzy filtering while a choice has focus: type to continue the
+query, or press Backspace to remove its final character. Clearing the query
+restores the choices. Ordinary text editors keep their caret and shortcuts;
+Space still activates focused buttons. Filtering never commits a selection:
+activate an option to apply it.
+
+In the wallpaper chooser, **Local** filters the local pool immediately.
+Provider searches (such as Wallhaven) are submitted only with Enter or
+**Search**, not on each keystroke. **Filter results** fuzzy-matches loaded
+labels, IDs, subtitles, and optional `tags: ["tag name", "tag alias"]` without
+making API requests. **Apply** saves the selected wallpaper; Enter in the
+provider query never applies it.
+
+For the input/output and streaming search contract, see the
+[wallpaper provider protocol](../DEVELOPMENT.md#wallpaper-provider-protocol).
