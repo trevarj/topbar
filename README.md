@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/topbar.png" width="112" height="112" alt="topbar icon">
+  <img src="assets/topbar.png" width="112" height="112" alt="topbar logo: four Quick Settings tiles with one mint active tile">
 </p>
 <h1 align="center">topbar</h1>
 <p align="center">A GNOME Shell-inspired top bar for niri.</p>
@@ -17,10 +17,6 @@
 **Contents:** [Screenshots](#screenshots) · [Features](#features) · [Install](#install) · [Running under niri](#running-under-niri) · [Configuration](#configuration) · [Links](#links) · [License](#license)
 
 ## Screenshots
-
-Real topbar running in nested niri with sample notifications, media, weather,
-and device data, not live device readings. UTC and “Sample City” protect location
-privacy; resource usage is read-only host data.
 
 ![topbar control center with grouped notifications, media controls, calendar, world clocks and weather forecast](assets/screenshots/topbar-panel.png)
 
