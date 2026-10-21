@@ -1,56 +1,73 @@
-# topbar
+<p align="center">
+  <img src="assets/topbar.png" width="112" height="112" alt="topbar icon">
+</p>
+<h1 align="center">topbar</h1>
+<p align="center">A GNOME Shell-inspired top bar for niri.</p>
+<p align="center">
+  <a href="https://github.com/trevarj/topbar/actions/workflows/ci.yml"><img src="https://github.com/trevarj/topbar/actions/workflows/ci.yml/badge.svg?branch=master" alt="CI status on master"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/built_with-Rust-000000?logo=rust" alt="Built with Rust"></a>
+  <a href="#install"><img src="https://img.shields.io/badge/install-Nix-5277C3?logo=nixos&logoColor=white" alt="Install with Nix"></a>
+</p>
+<p align="center">
+  <a href="#install">Install</a> · <a href="docs/configuration.md">Configuration</a> · <a href="#links">Documentation</a>
+</p>
+<p align="center">Not affiliated with or endorsed by the GNOME Project.</p>
 
-A GNOME Shell-style top bar for [niri](https://github.com/YaLTeR/niri), built
-with GTK4 and `gtk4-layer-shell`. GNOME Shell is the design inspiration only —
-topbar is not affiliated with or endorsed by the GNOME Project.
+**Contents:** [Screenshots](#screenshots) · [Features](#features) · [Install](#install) · [Running under niri](#running-under-niri) · [Configuration](#configuration) · [Links](#links) · [License](#license)
 
-![topbar](assets/screenshots/topbar.png)
+## Screenshots
 
-One solid, full-width panel pinned to the top of every monitor: workspaces and
-indicators on the left, clock and weather in the center, tray, alerts and the
-quick-settings aggregate menu on the right. Clicking the clock opens a GNOME
-date menu with notifications, calendar, world clocks, media controls and the
-weather forecast.
+Real topbar running in nested niri with sample notifications, media, weather,
+and device data, not live device readings. UTC and “Sample City” protect location
+privacy; resource usage is read-only host data.
 
-![the control panel](assets/screenshots/topbar-panel.png)
+![topbar control center with grouped notifications, media controls, calendar, world clocks and weather forecast](assets/screenshots/topbar-panel.png)
 
-## What is on the bar
+Control center: notifications, media and the day ahead.
 
-- **workspaces** — GNOME Activities-style dots with an animated active pill,
-  filtered to the monitor they are on. Urgent workspaces pulse.
-- **clock** — any `strftime` format, aligned to the boundary, with the date
-  menu behind it: notification history with grouping and Do Not Disturb, a calendar,
-  world clocks, MPRIS media controls and a five-day forecast. A dot beside the time
-  marks unseen notification history.
-- **weather** — Open-Meteo current conditions and forecast, with a location
-  search dialog. One cache for the whole panel.
-- **crypto** — bitcoin, ethereum and monero prices from CoinGecko, singly or as
-  pair ratios, with a popover that edits the list without touching your config.
-- **tray** — StatusNotifierItem host with dbusmenu support and an overflow
-  chevron.
-- **system_monitor** — invisible while the machine is healthy; fades in with
-  warning-tinted icons once CPU, memory or disk crosses a threshold.
-- **headset** — battery for a 2.4GHz wireless headset, via `headsetcontrol`.
-- **keyboard_layout**, **os_logo**, and **custom-\*** widgets that run a script
-  and speak Waybar's JSON contract.
-- **quick_settings** — the GNOME 45 aggregate menu: Wi-Fi (with a secret agent
-  for passwords), Bluetooth (with a pairing agent), VPN, volume and microphone,
-  brightness, Power Mode, Caffeine, battery health with charge thresholds,
-  pending updates, a resource overview, privacy dots, and a power section that
-  asks you to hold the row down.
+![topbar quick settings with Wi-Fi, Bluetooth, VPN, volume, power profile, battery and updates](assets/screenshots/topbar-quick-settings.png)
 
-Plus the surfaces that are not widgets: the notification daemon and its
-banners, the volume and brightness OSD capsule, and compositor blur behind
-everything the panel draws.
+Quick settings: connections, sound and system controls.
 
-**Configuration is applied live.** Save `config.toml` and the panel changes:
-colours are a stylesheet swap, a widget's own section rebuilds that widget, and
-only the bar's geometry rebuilds the bars. A file that does not parse changes
-nothing and says so in one banner.
+## Features
+
+- **One continuous panel.** Full-width on every monitor, with monitor-aware
+  workspace dots, names or indices and urgency indicators, keyboard layout
+  and a distro indicator.
+- **Control center and notifications.** Grouped notification history, Do Not
+  Disturb, calendar, world clocks, MPRIS media controls and forecast.
+  Notification banners and an unseen-history indicator keep arrivals visible.
+- **Quick settings.** Wired networking, Wi-Fi passwords, Bluetooth pairing,
+  stored-profile VPN, output-device selection, volume and microphone,
+  brightness, power profiles, Caffeine, battery health and charge limits,
+  updates, resource overview and privacy indicators. Lock directly; hold to
+  confirm logout, suspend, restart or shutdown. See the
+  [optional rows and VPN limitations](docs/configuration.md#widgetsquick_settings);
+  VPN plugins' interactive authentication dialogs are not supported.
+- **Launcher.** Fuzzy Applications, Actions, Windows and Files search, frequent
+  apps, window focusing and file actions. Open it with `topbar launcher toggle`.
+- **Weather.** Location search, Celsius or Fahrenheit and a multi-day forecast.
+- **Quiet indicators.** Tray icons with menus and overflow, resource alerts
+  that stay hidden while healthy, and headset battery status.
+- **Optional data widgets.** BTC, ETH and XMR prices and pair ratios, unread
+  mail from an existing notmuch index, and Waybar-compatible custom scripts.
+- **Appearance.** Dark and light palettes, accent and custom colors, optional
+  compositor blur, animation controls, widget placement and click actions.
+  Theme and Wallpaper integrations run your configured commands, not an
+  included wallpaper backend.
+- **Live configuration.** Reload on save, retaining the last valid configuration
+  when a file is invalid. Volume and brightness media keys show an OSD.
+- **Standalone tools.** List, theme and wallpaper choosers through
+  `topbar choose --title ...`, plus GnuPG pinentry through `topbar pinentry`.
 
 ## Install
 
-The flake exposes a package and an overlay for `x86_64-linux`.
+```sh
+nix run github:trevarj/topbar
+```
+
+The flake currently supports `x86_64-linux`. To install through a NixOS flake:
 
 ```nix
 # flake.nix
@@ -70,12 +87,6 @@ The flake exposes a package and an overlay for `x86_64-linux`.
 }
 ```
 
-Or run it without installing:
-
-```sh
-nix run github:trevarj/topbar
-```
-
 ## Running under niri
 
 Add to `~/.config/niri/config.kdl`:
@@ -83,18 +94,27 @@ Add to `~/.config/niri/config.kdl`:
 ```kdl
 spawn-at-startup "topbar"
 
-// Media keys route through the panel so they show an OSD.
 binds {
-    XF86AudioRaiseVolume  allow-when-locked=true { spawn "topbar" "volume" "inc" "5"; }
-    XF86AudioLowerVolume  allow-when-locked=true { spawn "topbar" "volume" "dec" "5"; }
-    XF86AudioMute         allow-when-locked=true { spawn "topbar" "volume" "toggle-mute"; }
-    XF86MonBrightnessUp                          { spawn "topbar" "brightness" "inc" "5"; }
-    XF86MonBrightnessDown                        { spawn "topbar" "brightness" "dec" "5"; }
+    Mod+Space { spawn "topbar" "launcher" "toggle"; }
+    XF86AudioRaiseVolume allow-when-locked=true { spawn "topbar" "volume" "inc" "5"; }
+    XF86AudioLowerVolume allow-when-locked=true { spawn "topbar" "volume" "dec" "5"; }
+    XF86AudioMute        allow-when-locked=true { spawn "topbar" "volume" "toggle-mute"; }
+    XF86MonBrightnessUp   { spawn "topbar" "brightness" "inc" "5"; }
+    XF86MonBrightnessDown { spawn "topbar" "brightness" "dec" "5"; }
 }
+```
 
-// Blur behind the panel and its popovers, if you want it. `theme.blur = true`
-// in topbar's own configuration asks for the region; this is what the
-// compositor does with it.
+The panel reserves an exclusive zone so niri lays windows out beneath it.
+Volume and brightness commands work without a running panel, including when
+its configuration is broken; the OSD is optional feedback.
+
+<details>
+<summary>Optional compositor blur</summary>
+
+Set `blur = true` under `[theme]` in topbar's configuration and add this to
+niri's configuration:
+
+```kdl
 layer-rule {
     match namespace="^topbar$"
     match namespace="^topbar-popover$"
@@ -105,20 +125,7 @@ layer-rule {
 }
 ```
 
-The panel reserves an exclusive zone, so niri lays windows out beneath it
-automatically.
-
-See [Application launching](DEVELOPMENT.md#application-launching) for desktop
-entry launching behavior and limitations.
-
-The volume and brightness commands act on PulseAudio and logind **directly**
-and only then try to raise an OSD, so a media key still works when the panel is
-not running and when the configuration is broken.
-
-See [Picker keyboard interaction](docs/configuration.md#picker-keyboard-interaction)
-for filtering and selection, and the
-[wallpaper provider protocol](DEVELOPMENT.md#wallpaper-provider-protocol) for
-integrating a wallpaper source.
+</details>
 
 ## Configuration
 
@@ -126,15 +133,15 @@ Configuration lives at `~/.config/topbar/config.toml`. Every key is optional;
 omitted keys use built-in defaults. Changes apply live, and an invalid file
 leaves the last valid configuration running.
 
-The clock's control center is opt-in:
+The control center shown above is opt-in:
 
 ```toml
 [widgets.clock]
 control_panel = true
 ```
 
-Inspect the shipped defaults and validate your configuration without replacing
-an existing file:
+Inspect the shipped defaults and validate your configuration without
+replacing an existing file:
 
 ```sh
 topbar --print-example-config
@@ -142,21 +149,19 @@ topbar --check-config
 ```
 
 See the [example configuration](config.toml) and
-[configuration reference](docs/configuration.md) for all options, lookup order,
-live-reload behavior and integrations.
+[configuration reference](docs/configuration.md) for options, lookup order and
+integrations. Upgrading from gnome-topbar? Read
+[Coming from v1](docs/configuration.md#coming-from-v1).
 
-## Switching from gnome-topbar (v1)
+## Links
 
-See [Coming from v1](docs/configuration.md#coming-from-v1) before switching:
-stop the old panel, update executable/package and layer-shell names, and check
-removed features and update-count overrides.
-
-## Development
-
-See [DEVELOPMENT.md](DEVELOPMENT.md) for development commands, the visual
-playground and integration protocols, and
-[the architecture](docs/architecture.md) for the codebase map.
+- [Configuration reference](docs/configuration.md)
+- [Example configuration](config.toml)
+- [Development and integration reference](DEVELOPMENT.md)
+- [Architecture](docs/architecture.md)
+- [Report an issue](https://github.com/trevarj/topbar/issues)
+- [niri](https://github.com/niri-wm/niri)
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+[MIT](LICENSE).
