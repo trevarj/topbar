@@ -1,7 +1,6 @@
-<p align="center">
-  <img src="assets/topbar.png" width="112" height="112" alt="topbar logo: four Quick Settings tiles with one mint active tile">
-</p>
-<h1 align="center">topbar</h1>
+<h1 align="center">
+  <img src="assets/topbar.png" width="224" height="112" alt="topbar">
+</h1>
 <p align="center">A GNOME Shell-inspired top bar for niri.</p>
 <p align="center">
   <a href="https://github.com/trevarj/topbar/actions/workflows/ci.yml"><img src="https://github.com/trevarj/topbar/actions/workflows/ci.yml/badge.svg?branch=master" alt="CI status on master"></a>
