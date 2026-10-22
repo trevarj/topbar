@@ -21,9 +21,17 @@
 
 Control center: notifications, media and the day ahead.
 
-![topbar quick settings with Wi-Fi, Bluetooth, VPN, volume, power profile, battery and updates](assets/screenshots/topbar-quick-settings.png)
+![topbar quick settings with connected Bluetooth peripherals, audio outputs, microphone controls, networking and power settings](assets/screenshots/topbar-quick-settings.png)
 
-Quick settings: connections, sound and system controls.
+Quick settings: connected peripherals, audio outputs and system controls.
+
+![topbar launcher showing frequent applications, application icons and search category filters](assets/screenshots/topbar-launcher.png)
+
+Launcher: frequent applications and unified search.
+
+![topbar wallpaper picker showing a local collection, thumbnails and the selected wallpaper preview](assets/screenshots/topbar-picker.png)
+
+Wallpaper picker: browse and preview a local collection.
 
 ## Features
 
