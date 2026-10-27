@@ -1,6 +1,6 @@
 [package]
 name = "topbar"
-description = "GNOME Shell-inspired GTK4 top bar for niri"
+description = "GNOME Shell-inspired GTK4 top bar for Niri and MangoWM"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

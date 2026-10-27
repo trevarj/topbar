@@ -279,6 +279,16 @@ compositor's configuration — `workspace "chat"` — always exists whether or n
 anything is open on it, so it always gets a dot, as do the active workspace and
 any workspace asking for attention.
 
+On Mango 0.18.2, workspaces are output/tag pairs, with one-based tags from
+1 through 31. `[advanced.mango].persistent_tags` marks tags that should stay
+visible when empty; active, occupied, and urgent tags remain visible without
+that metadata. IDs stay tied to the connector and tag across output reordering
+and reconnects, not to a monitor's changing numeric position.
+
+Clicking the current pill remains a no-op on niri, including with its
+workspace-auto-back-and-forth option enabled. On Mango it dispatches activation
+so the current tag can leave overview.
+
 ## `[widgets.clock]`
 
 | Key | Type | Default | Meaning |
@@ -487,6 +497,13 @@ dongle costs no bar space.
 A session configured with one layout has nothing to switch to, and the widget
 draws nothing at all.
 
+Mango 0.18.2 reports the live full XKB description but does not enumerate its
+configured layout list. Supply `advanced.mango.keyboard_layouts` in that exact
+order to enable switching; it describes the compositor's configuration and
+does not change it. An empty list publishes a layout count of zero, so switching
+is disabled and the widget stays hidden; workspace and window integration
+remain live. See [Mango metadata](#advancedmango) for switching semantics.
+
 ## `[widgets.os_logo]`
 
 | Key | Type | Default | Meaning |
@@ -653,8 +670,27 @@ one of them is safe to guess.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `compositor` | string | `"auto"` | `"auto"` or `"niri"`. Both select the niri backend. |
+| `compositor` | string | `"auto"` | `"auto"`, `"niri"`, or `"mango"` (Mango 0.18.2). Startup-only. |
 | `pango_font_rendering` | bool | `false` | Apply Pango font attributes instead of relying on GTK CSS. |
+| `mango` | table | empty metadata | Startup-only Mango metadata; see below. |
+
+Explicit `"niri"` or `"mango"` always selects that backend. A missing connection
+marker or unavailable compositor leaves its service disconnected; it does not
+silently select the other backend.
+
+`"auto"` first matches `niri` or `mango` tokens in `XDG_CURRENT_DESKTOP`,
+case-insensitively, splitting on colons, semicolons, or whitespace. A matching
+identity wins over an
+inherited socket marker for the other backend. Only when desktop identity is
+empty does exactly one nonempty `NIRI_SOCKET` or `MANGO_INSTANCE_SIGNATURE`
+choose the backend. Ambiguous identities or markers, no markers, and a nonempty
+unrecognised desktop identity are errors; connection availability is not probed
+to guess a backend.
+
+`advanced.compositor` and both Mango metadata lists are startup-only. Changing
+any of them requires restarting topbar. Reload rejects the entire candidate
+before installation, even if it also contains valid theme or widget changes;
+none of those other changes are applied.
 
 GTK sets font sizes from CSS with `pango_font_description_set_absolute_size`,
 which bypasses Pango's DPI-aware hinting; on layer-shell surfaces that can clip
@@ -663,6 +699,50 @@ font as a Pango attribute in points, which does go through the DPI-aware path.
 This applies to the bar, popovers, and notification banners, including labels
 created by replacement notifications. It is off by default because it is a
 workaround for a problem most setups do not have.
+
+### `[advanced.mango]`
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `persistent_tags` | array of integers | `[]` | Unique one-based tags in `1..=31`, kept visible when empty. |
+| `keyboard_layouts` | array of strings | `[]` | Up to 100 unique, nonblank full XKB descriptions, in Mango's configured order. |
+
+```toml
+[advanced]
+compositor = "mango"
+
+[advanced.mango]
+persistent_tags = [1, 2, 3]
+keyboard_layouts = ["English (US)", "Russian"]
+```
+
+Both lists default to empty everywhere, including the shipped example. Names
+are preserved verbatim: whitespace is checked only to reject blank names, not
+trimmed, and duplicates are rejected by exact string equality. `"English (US)"`
+and `" English (US) "` are distinct; use the exact descriptions Mango reports.
+Unknown nested keys follow the usual warning policy and fail `--strict`.
+
+With at least two metadata names, next-layout switching uses Mango's native
+cycle operation, even if the current description is absent from the list; it
+does not guess an index. Previous-layout switching queries the live full
+description and finds its exact position in the configured list before selecting
+the predecessor. An unmatched description makes **previous** fail visibly without
+mutation. Fewer than two metadata names disable both actions. Changing the list
+or its order requires a topbar restart.
+
+Each Mango workspace ID encodes an output connector's lifetime-stable slot and
+one-based tag: `(slot << 32) | tag`. Slots are never reassigned to a different
+connector during the topbar process's lifetime, so output reorder, removal, or
+reconnect cannot reinterpret an old ID as another output.
+
+Workspace and window mutations check the exact live target before and after
+the command. A disabled output's zero-sized geometry is rejected before any
+activation command, even if its retained monitor object still reports tags.
+Stock Mango's `viewcrossmon` has a hot-unplug race between those
+checks: a monitor can disappear while the compositor processes the request.
+topbar detects a changed target and reports failure without retrying or issuing
+a compensating action. This is not an atomic guarantee that stock Mango cannot
+redirect an action during that race.
 
 ---
 
@@ -690,7 +770,8 @@ panel does the smallest correct thing:
 | One `[widgets.<name>]` section | Rebuild that widget on every bar. |
 | `[bar]` | Rebuild every bar, and regenerate the stylesheet. |
 | `left`, `center`, `right` | Rebuild every bar. |
-| `[advanced]` | Rebuild every bar. |
+| `advanced.pango_font_rendering` | Rebuild every bar. |
+| `advanced.compositor`, either `[advanced.mango]` list | Reject the entire candidate; restart topbar. |
 | `[osd]` | Rebuild each bar's capsule. |
 | `[audio]`, `[updates]`, and the weather, crypto, system_monitor and headset intervals | Tell the service. Nothing is rebuilt. |
 
@@ -699,8 +780,8 @@ timers, which is why the routing is worth having: a changed accent colour
 touches no widget at all, and a changed `clock.format` touches one.
 
 `[bar]` appears twice because it feeds both the window geometry and the
-stylesheet, and it does both. `[advanced]` rebuilds bars because
-`pango_font_rendering` is applied to a window when it is built.
+stylesheet, and it does both. `advanced.pango_font_rendering` rebuilds bars
+because it is applied to a window when it is built; it remains live-reloadable.
 
 Services with a `configure` seam are told rather than restarted: the weather
 keeps the forecast it has while re-timing, crypto keeps its prices, and the

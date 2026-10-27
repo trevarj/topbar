@@ -49,7 +49,7 @@ pub const SUPPORTED_WIDGETS: &[&str] = &[
 pub const SUPPORTED_CRYPTO_ASSETS: &[&str] = &["btc", "eth", "xmr"];
 
 const VALID_OSD_POSITIONS: &[&str] = &["bottom", "left", "right", "top"];
-const VALID_COMPOSITORS: &[&str] = &["auto", "niri"];
+const VALID_COMPOSITORS: &[&str] = &["auto", "niri", "mango"];
 const VALID_WEATHER_UNITS: &[&str] = &["c", "celsius", "f", "fahrenheit"];
 const VALID_LABEL_TYPES: &[&str] = &["none", "index", "name"];
 const VALID_LAYOUT_FORMATS: &[&str] = &["short", "long"];
@@ -455,12 +455,7 @@ impl Config {
             APPEARANCE_KEYS,
             &mut lint,
         );
-        let advanced = parse_plain(
-            "advanced",
-            take_table(&mut root, "advanced", &mut lint),
-            ADVANCED_KEYS,
-            &mut lint,
-        );
+        let advanced = parse_advanced(take_table(&mut root, "advanced", &mut lint), &mut lint);
 
         for key in root.keys() {
             lint.unknown_key(key, WidgetScope::None);
@@ -735,6 +730,36 @@ fn parse_theme(mut table: Table, lint: &mut Lint) -> ThemeConfig {
 
     retain_known("theme", &mut table, THEME_KEYS, WidgetScope::None, lint);
     deserialize("theme", table, lint)
+}
+
+fn parse_advanced(mut table: Table, lint: &mut Lint) -> AdvancedConfig {
+    match table.get_mut("mango") {
+        Some(toml::Value::Table(nested)) => {
+            retain_known(
+                "advanced.mango",
+                nested,
+                MANGO_KEYS,
+                WidgetScope::None,
+                lint,
+            );
+        }
+        Some(other) => {
+            lint.error(format!(
+                "advanced.mango: expected a table, found {}",
+                other.type_str()
+            ));
+            table.remove("mango");
+        }
+        None => {}
+    }
+    retain_known(
+        "advanced",
+        &mut table,
+        ADVANCED_KEYS,
+        WidgetScope::None,
+        lint,
+    );
+    deserialize("advanced", table, lint)
 }
 
 fn parse_widgets(mut table: Table, lint: &mut Lint) -> WidgetsConfig {
@@ -2233,16 +2258,19 @@ impl AppearanceConfig {
     }
 }
 
-const ADVANCED_KEYS: &[&str] = &["compositor", "pango_font_rendering"];
+const ADVANCED_KEYS: &[&str] = &["compositor", "pango_font_rendering", "mango"];
+const MANGO_KEYS: &[&str] = &["persistent_tags", "keyboard_layouts"];
 
 /// `[advanced]`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AdvancedConfig {
-    /// Startup-only backend: `"auto"` or `"niri"`.
+    /// Startup-only backend: `"auto"`, `"niri"`, or `"mango"`.
     pub compositor: String,
     /// Apply Pango font attributes directly instead of relying on GTK CSS.
     pub pango_font_rendering: bool,
+    /// Startup-only metadata for the Mango backend.
+    pub mango: MangoConfig,
 }
 
 impl Default for AdvancedConfig {
@@ -2250,6 +2278,7 @@ impl Default for AdvancedConfig {
         Self {
             compositor: "auto".to_string(),
             pango_font_rendering: false,
+            mango: MangoConfig::default(),
         }
     }
 }
@@ -2262,6 +2291,51 @@ impl AdvancedConfig {
             &self.compositor,
             VALID_COMPOSITORS,
         );
+        self.mango.validate(lint);
+    }
+}
+
+/// `[advanced.mango]` — startup-only metadata Mango's IPC does not enumerate.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MangoConfig {
+    /// One-based tags that remain visible when empty.
+    pub persistent_tags: Vec<u32>,
+    /// Exact XKB layout descriptions in the compositor's configured order.
+    pub keyboard_layouts: Vec<String>,
+}
+
+impl MangoConfig {
+    fn validate(&self, lint: &mut Lint) {
+        let mut seen_tags = 0_u32;
+        for tag in &self.persistent_tags {
+            if !(1..=31).contains(tag) {
+                lint.error("advanced.mango.persistent_tags: tags must be between 1 and 31");
+                continue;
+            }
+            let mask = 1_u32 << (*tag - 1);
+            if seen_tags & mask != 0 {
+                lint.error(format!(
+                    "advanced.mango.persistent_tags: duplicate tag {tag}"
+                ));
+            }
+            seen_tags |= mask;
+        }
+        if self.keyboard_layouts.len() > 100 {
+            lint.error("advanced.mango.keyboard_layouts: at most 100 layout names are supported");
+            return;
+        }
+        // ponytail: the 100-name cap bounds this scan; use a set if that cap grows.
+        for (index, name) in self.keyboard_layouts.iter().enumerate() {
+            if name.trim().is_empty() {
+                lint.error("advanced.mango.keyboard_layouts: layout names must not be blank");
+            }
+            if self.keyboard_layouts[..index].contains(name) {
+                lint.error(format!(
+                    "advanced.mango.keyboard_layouts: duplicate layout name {name:?}"
+                ));
+            }
+        }
     }
 }
 
@@ -2325,6 +2399,9 @@ mod tests {
     fn example_config_equals_defaults_and_warns_about_nothing() {
         let (config, warnings) = parse_ok(EXAMPLE_CONFIG_TOML);
         assert_eq!(config, Config::default());
+        assert_eq!(config.advanced.mango, MangoConfig::default());
+        assert!(config.advanced.mango.persistent_tags.is_empty());
+        assert!(config.advanced.mango.keyboard_layouts.is_empty());
         assert_eq!(warnings, Vec::new(), "example config must be warning-free");
     }
 
@@ -2370,6 +2447,173 @@ mod tests {
     }
 
     #[test]
+    fn mango_metadata_defaults_and_partial_sections() {
+        for source in ["", "[advanced.mango]", "[advanced]\ncompositor = \"mango\""] {
+            let (config, warnings) = parse_ok(source);
+            assert_eq!(config.advanced.mango, MangoConfig::default());
+            assert!(warnings.is_empty());
+        }
+        let (config, warnings) = parse_ok("[advanced.mango]\npersistent_tags = [31, 1, 9]");
+        assert_eq!(config.advanced.mango.persistent_tags, [31, 1, 9]);
+        assert!(config.advanced.mango.keyboard_layouts.is_empty());
+        assert_eq!(config.advanced.compositor, "auto");
+        assert!(!config.advanced.pango_font_rendering);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn mango_metadata_preserves_names_and_round_trips() {
+        let (config, warnings) = parse_ok(
+            r#"
+[advanced]
+compositor = "mango"
+[advanced.mango]
+persistent_tags = [1, 9, 31]
+keyboard_layouts = ["English (US)", " English (US) ", "english (US)"]
+"#,
+        );
+        assert!(warnings.is_empty());
+        assert_eq!(config.advanced.compositor, "mango");
+        assert_eq!(config.advanced.mango.persistent_tags, [1, 9, 31]);
+        assert_eq!(
+            config.advanced.mango.keyboard_layouts,
+            ["English (US)", " English (US) ", "english (US)"]
+        );
+        let dumped = config.to_toml().expect("Mango metadata serializes");
+        let (again, warnings) = parse_ok(&dumped);
+        assert_eq!(again, config);
+        assert!(warnings.is_empty());
+        let json = config.to_json().expect("Mango metadata serializes as JSON");
+        assert_eq!(
+            json["advanced"]["mango"],
+            serde_json::json!({
+                "persistent_tags": [1, 9, 31],
+                "keyboard_layouts": ["English (US)", " English (US) ", "english (US)"]
+            })
+        );
+    }
+
+    #[test]
+    fn mango_tags_are_one_based_bounded_and_unique() {
+        for tags in ["[]", "[1]", "[31]", "[31, 1]"] {
+            assert!(Config::parse(&format!("[advanced.mango]\npersistent_tags = {tags}")).is_ok());
+        }
+        for tags in ["[0]", "[32]", "[1, 1]", "[31, 31]"] {
+            let errors = errors_of(&format!("[advanced.mango]\npersistent_tags = {tags}"));
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.starts_with("advanced.mango.persistent_tags:")),
+                "{tags}: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mango_layout_names_are_nonblank_exactly_unique_and_limited_to_100() {
+        for names in [
+            r#"[""]"#,
+            r#"["  "]"#,
+            r#"["\t\n"]"#,
+            r#"["\u2003"]"#,
+            r#"["English (US)", "English (US)"]"#,
+        ] {
+            let errors = errors_of(&format!("[advanced.mango]\nkeyboard_layouts = {names}"));
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.starts_with("advanced.mango.keyboard_layouts:")),
+                "{names}: {errors:?}"
+            );
+        }
+        for count in [100, 101] {
+            let names: Vec<_> = (0..count).map(|index| format!("Layout {index}")).collect();
+            let source = format!(
+                "[advanced.mango]\nkeyboard_layouts = {}",
+                serde_json::json!(names)
+            );
+            if count == 100 {
+                let (config, warnings) = parse_ok(&source);
+                assert_eq!(config.advanced.mango.keyboard_layouts.len(), 100);
+                assert!(warnings.is_empty());
+            } else {
+                assert!(
+                    errors_of(&source)
+                        .iter()
+                        .any(|error| error.contains("at most 100"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mango_metadata_requires_a_table_before_the_strict_warning_policy() {
+        // These are hard validation errors before the caller considers --strict.
+        for value in [
+            "false",
+            "1",
+            "\"mango\"",
+            "[]",
+            "[[], []]",
+            "[[1, 3], [\"English (US)\", \"Russian\"]]",
+            "[{ persistent_tags = [1], keyboard_layouts = [] }]",
+        ] {
+            let source = format!("[advanced]\nmango = {value}");
+            let errors = errors_of(&source);
+            assert_eq!(errors.len(), 1, "{value}: {errors:?}");
+            assert!(
+                errors[0].starts_with("advanced.mango: expected a table, found "),
+                "{value}: {errors:?}"
+            );
+        }
+        let errors = errors_of("[[advanced.mango]]\npersistent_tags = [1]");
+        assert_eq!(errors, ["advanced.mango: expected a table, found array"]);
+    }
+
+    #[test]
+    fn mango_wrong_arrays_and_element_types_are_errors() {
+        for source in [
+            "[advanced.mango]\npersistent_tags = 1",
+            "[advanced.mango]\npersistent_tags = [\"1\"]",
+            "[advanced.mango]\npersistent_tags = [1.0]",
+            "[advanced.mango]\npersistent_tags = [-1]",
+            "[advanced.mango]\npersistent_tags = [4294967296]",
+            "[advanced.mango]\nkeyboard_layouts = \"English (US)\"",
+            "[advanced.mango]\nkeyboard_layouts = [1]",
+        ] {
+            let errors = errors_of(source);
+            assert_eq!(errors.len(), 1, "{source}: {errors:?}");
+            assert!(errors[0].starts_with("advanced:"), "{source}: {errors:?}");
+        }
+    }
+
+    #[test]
+    fn mango_nested_unknown_keys_follow_normal_warning_policy() {
+        let (config, warnings) = parse_ok(
+            r#"
+[advanced]
+compositor = "mango"
+unknown = true
+[advanced.mango]
+persistent_tags = [1]
+keyboard_layouts = ["English (US)"]
+unknown = { nested = true }
+"#,
+        );
+        assert_eq!(
+            warning_keys(&warnings),
+            ["advanced.mango.unknown", "advanced.unknown"]
+        );
+        assert!(
+            warnings
+                .iter()
+                .all(|warning| warning.message == "unknown option, ignored")
+        );
+        assert_eq!(config.advanced.mango.persistent_tags, [1]);
+        assert_eq!(config.advanced.mango.keyboard_layouts, ["English (US)"]);
+    }
+
+    #[test]
     fn partial_section_keeps_sibling_defaults() {
         let (config, _) = parse_ok("[bar]\nsize = 40\n");
         assert_eq!(config.bar.size, 40);
@@ -2407,7 +2651,7 @@ mod tests {
         assert!(Config::parse("[theme]\npalette = false").is_err());
         let (_, warnings) = parse_ok("[theme.palette]\nunknown = \"#fff\"");
         assert_eq!(warning_keys(&warnings), ["theme.palette.unknown"]);
-        for backend in ["auto", "niri"] {
+        for backend in ["auto", "niri", "mango"] {
             assert!(Config::parse(&format!("[advanced]\ncompositor = {backend:?}")).is_ok());
         }
         assert!(Config::parse("[advanced]\ncompositor = \"hyprland\"").is_err());

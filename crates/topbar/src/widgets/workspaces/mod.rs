@@ -115,7 +115,7 @@ impl WorkspacesWidget {
     }
 }
 
-/// Clicking an indicator focuses its workspace.
+/// Clicking focuses a workspace; only Niri skips its already-focused indicator.
 fn install_click(strip: &WorkspaceStrip, state: &Rc<State>) {
     let click = GestureClick::new();
     click.set_button(gdk::BUTTON_PRIMARY);
@@ -129,10 +129,12 @@ fn install_click(strip: &WorkspaceStrip, state: &Rc<State>) {
             let Some(slot) = state.slots.borrow().get(index).cloned() else {
                 return;
             };
-            if slot.is_focused {
+            let Some(target) =
+                slot.click_target(matches!(&state.compositor, CompositorHandle::Niri(_)))
+            else {
                 return;
-            }
-            focus(&state.compositor, slot.id);
+            };
+            focus(&state.compositor, target);
         }
     });
     strip.add_controller(click);

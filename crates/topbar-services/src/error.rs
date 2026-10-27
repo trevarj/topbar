@@ -13,7 +13,7 @@ pub enum SvcError {
     #[error("NIRI_SOCKET is not set; the panel is not running under niri")]
     NoNiriSocket,
 
-    /// Niri cannot be selected for the current session or configuration.
+    /// A compositor cannot be selected for the current session or configuration.
     #[error("compositor selection failed: {0}")]
     CompositorSelection(String),
 
@@ -32,6 +32,10 @@ pub enum SvcError {
     /// The compositor answered with something we cannot read.
     #[error("unreadable reply from compositor: {0}")]
     Protocol(String),
+
+    /// The keyboard layout could not be changed.
+    #[error("could not switch the keyboard layout: {0}")]
+    KeyboardLayout(String),
 
     /// The session bus could not be reached, or refused a request.
     ///
@@ -155,6 +159,7 @@ impl SvcError {
             Self::CompositorSelection(_) => "Could not select the compositor",
             Self::Rejected(_) => "The compositor refused the request",
             Self::Protocol(_) => "The compositor sent an unexpected reply",
+            Self::KeyboardLayout(_) => "Could not switch the keyboard layout",
             Self::Bus(_) => "Could not reach the session bus",
             Self::NameTaken(_) => "Another notification daemon is running",
             Self::GoneNotification(_) => "That notification is no longer available",
@@ -191,6 +196,7 @@ mod tests {
             SvcError::Timeout(Duration::from_secs(2)),
             SvcError::Rejected("no such workspace".into()),
             SvcError::Protocol("expected Handled".into()),
+            SvcError::KeyboardLayout("layout index is out of range".into()),
             SvcError::Bus("connection refused".into()),
             SvcError::NameTaken("org.freedesktop.Notifications".into()),
             SvcError::GoneNotification(7),
@@ -231,5 +237,12 @@ mod tests {
     fn display_keeps_the_detail_the_log_needs() {
         let error = SvcError::Rejected("no such workspace".into());
         assert!(error.to_string().contains("no such workspace"));
+    }
+
+    #[test]
+    fn keyboard_layout_error_keeps_detail_out_of_the_user_message() {
+        let error = SvcError::KeyboardLayout("layout index is out of range".into());
+        assert_eq!(error.user_message(), "Could not switch the keyboard layout");
+        assert!(error.to_string().contains("layout index is out of range"));
     }
 }

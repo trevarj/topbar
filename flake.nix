@@ -1,5 +1,5 @@
 {
-  description = "topbar - GNOME Shell-style top bar for Niri (GTK4 + layer-shell)";
+  description = "topbar - GNOME Shell-style Wayland top bar (GTK4 + layer-shell)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
@@ -102,7 +102,7 @@
             )
           '';
           meta = {
-            description = "GNOME Shell-inspired GTK4 top bar for Niri";
+            description = "GNOME Shell-inspired GTK4 top bar for Niri and Mango";
             license = lib.licenses.mit;
             mainProgram = "topbar";
             platforms = [ "x86_64-linux" ];
@@ -183,6 +183,15 @@
           xdg-terminal-exec
           niri
           grim
+          awww
+          # Disposable terminals and capture helpers; reuse host Brave at runtime.
+          kitty
+          jq
+          wl-clipboard
+          slurp
+          satty
+          xterm
+          util-linux # setsid keeps the private bus alive through Ctrl+C cleanup
           headsetcontrol
           brightnessctl
           # `notify-send`, for driving the notification daemon by hand. Always
@@ -214,6 +223,7 @@
           wtype
         ];
         RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+        XCURSOR_PATH = "${pkgs.adwaita-icon-theme}/share/icons";
         shellHook = pre-commit.shellHook;
       };
 

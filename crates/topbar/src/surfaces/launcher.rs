@@ -1771,9 +1771,9 @@ fn section_messages(
             && !windows.connected)
             .then(|| {
                 if query.is_empty() {
-                    "Windows are unavailable while niri reconnects.".into()
+                    "Windows are unavailable while the compositor reconnects.".into()
                 } else {
-                    "Window search is unavailable while niri reconnects.".into()
+                    "Window search is unavailable while the compositor reconnects.".into()
                 }
             }),
         files: (!query.is_empty() && wants(Filter::Files))
@@ -2198,7 +2198,7 @@ mod tests {
             )
             .windows
             .as_deref(),
-            Some("Windows are unavailable while niri reconnects.")
+            Some("Windows are unavailable while the compositor reconnects.")
         );
         assert_eq!(
             section_messages(
@@ -2448,7 +2448,7 @@ mod tests {
         );
         assert_eq!(
             messages.windows.as_deref(),
-            Some("Window search is unavailable while niri reconnects.")
+            Some("Window search is unavailable while the compositor reconnects.")
         );
         assert_eq!(
             messages.files.as_deref(),

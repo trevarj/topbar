@@ -15,7 +15,7 @@
 //! | `theme.animations` / `ripple` | flip the motion switches |
 //! | `theme.blur` | re-bind (or release) the blur protocol, rebuild the bars |
 //! | one `[widgets.<name>]` section | rebuild that widget on every bar |
-//! | bar geometry, placement, Pango rendering | rebuild bars; compositor selector changes reject reload |
+//! | bar geometry, placement, Pango rendering | rebuild bars; compositor selector or Mango metadata changes reject reload |
 //! | `[osd]` | rebuild each bar's capsule |
 //! | `[audio]`, `[updates]`, per-widget intervals | tell the service |
 //!
@@ -70,6 +70,12 @@ pub struct Reloader {
 fn check_startup_settings(previous: &Config, candidate: &Config) -> Result<(), String> {
     if previous.advanced.compositor != candidate.advanced.compositor {
         return Err("advanced.compositor is startup-only; restart topbar to change it (no settings applied)".into());
+    }
+    if previous.advanced.mango != candidate.advanced.mango {
+        return Err(
+            "advanced.mango is startup-only; restart topbar to change it (no settings applied)"
+                .into(),
+        );
     }
     Ok(())
 }
@@ -406,6 +412,57 @@ mod tests {
         assert!(check_startup_settings(&previous, &candidate).is_err());
         candidate.advanced.compositor = previous.advanced.compositor.clone();
         assert!(check_startup_settings(&previous, &candidate).is_ok());
+    }
+
+    #[test]
+    fn mango_metadata_changes_reject_the_entire_candidate_before_installation() {
+        let (previous, _) = Config::parse(
+            r#"
+[advanced]
+compositor = "mango"
+[advanced.mango]
+persistent_tags = [1, 9]
+keyboard_layouts = ["English (US)", "Russian"]
+"#,
+        )
+        .expect("initial Mango metadata");
+        for (tags, layouts) in [
+            ("[1, 9, 31]", r#"["English (US)", "Russian"]"#),
+            ("[1]", r#"["English (US)", "Russian"]"#),
+            ("[9, 1]", r#"["English (US)", "Russian"]"#),
+            ("[1, 9]", r#"["English (US)", "Russian", "German"]"#),
+            ("[1, 9]", r#"["English (US)"]"#),
+            ("[1, 9]", r#"["Russian", "English (US)"]"#),
+            ("[1, 9]", r#"[" English (US) ", "Russian"]"#),
+        ] {
+            let mut candidate = previous.clone();
+            candidate.theme.mode = "light".into();
+            candidate.advanced.pango_font_rendering = true;
+            let (metadata, _) = Config::parse(&format!(
+                "[advanced.mango]\npersistent_tags = {tags}\nkeyboard_layouts = {layouts}"
+            ))
+            .expect("valid replacement metadata");
+            candidate.advanced.mango = metadata.advanced.mango;
+            let error =
+                check_startup_settings(&previous, &candidate).expect_err("restart required");
+            assert!(error.contains("advanced.mango"), "{error}");
+            assert!(error.contains("no settings applied"), "{error}");
+        }
+    }
+
+    #[test]
+    fn pango_rendering_still_reloads_with_unchanged_mango_metadata() {
+        let (previous, _) = Config::parse(
+            "[advanced]\ncompositor = \"mango\"\n\
+             [advanced.mango]\npersistent_tags = [1]\nkeyboard_layouts = [\"English (US)\"]",
+        )
+        .expect("initial Mango metadata");
+        let mut candidate = previous.clone();
+        candidate.advanced.pango_font_rendering = true;
+        assert!(check_startup_settings(&previous, &candidate).is_ok());
+        let delta = ConfigDelta::between(&previous, &candidate);
+        assert!(delta.advanced);
+        assert!(delta.rebuilds_bars());
     }
 
     #[test]

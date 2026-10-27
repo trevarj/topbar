@@ -1,9 +1,6 @@
 #!/usr/bin/env sh
-# Nested-niri visual smoke test: start the panel inside a headless-ish niri
-# session, screenshot it with grim, and archive the PNG.
-#
-# Local only — niri has no headless backend, so CI cannot run this.
-# Run it from the dev shell: nix develop -c ./scripts/visual-smoke-niri.sh
+# Nested Wayland visual smoke test (Niri by default, Mango on request).
+# Local only: run from a visible parent Wayland session in the dev shell.
 #
 # EVERYTHING runs inside `dbus-run-session`, on a private bus that exists only
 # for the length of the run. This is not optional: from M4 the panel takes
@@ -12,7 +9,9 @@
 # from whatever is actually serving them.
 #
 # Environment:
-#   TOPBAR_VISUAL_CONFIG  panel config to run (default ./config.toml)
+#   TOPBAR_SMOKE_COMPOSITOR niri|mango (niri)
+#   TOPBAR_SMOKE_MANGO_CONFIG optional production Mango config to preview safely
+#   TOPBAR_VISUAL_CONFIG  read-only panel config source (default ./config.toml)
 #   TOPBAR_SMOKE_OPEN     open a widget's popover without a pointer.
 #                         There is no synthetic input in the dev shell, so
 #                         this is how an *open* popover gets screenshotted
@@ -60,9 +59,8 @@
 #                         /sys/class/power_supply tree is created alongside it
 #                         and handed to both the panel and the driver, so the
 #                         charge-limit write path lands in a temporary
-#                         directory. logind is deliberately NOT redirected —
-#                         the idle inhibitor keeps talking to the real one, as
-#                         it has since M8.
+#                         directory. The real system bus is blocked, including
+#                         logind; no preview acquires a host sleep inhibitor.
 #                         The value is passed to the fake as extra arguments,
 #                         so a scenario can choose which bus names it answers
 #                         to and what the battery reads.
@@ -131,17 +129,255 @@
 # `topbar volume set 30` and the rest against the session it is inside.
 set -eu
 
-# A nested non-session launch does not replace inherited desktop markers.
-export XDG_CURRENT_DESKTOP=niri
+# Keep transformation and its regression check together; no TOML dependency.
+prepare_mango() {
+  python3 - "$@" <<'PREPARE'
+import copy, json, pathlib, shlex, sys, tomllib
 
+def value(item):
+    if isinstance(item, dict):
+        return "{ " + ", ".join(json.dumps(k) + " = " + value(v) for k, v in item.items()) + " }"
+    if isinstance(item, list):
+        return "[" + ", ".join(map(value, item)) + "]"
+    if isinstance(item, bool):
+        return str(item).lower()
+    if isinstance(item, (str, int, float)):
+        return json.dumps(item, ensure_ascii=False, allow_nan=False)
+    raise ValueError("unsupported TOML value: " + repr(item))
+
+def sanitize(config, home, headset):
+    config = copy.deepcopy(config)
+    config.pop("appearance", None)
+    def clean(table):
+        if isinstance(table, dict):
+            for key in list(table):
+                if key.startswith("on_") or key in {"exec", "command", "update_count_command"} or key.startswith("custom-"):
+                    del table[key]
+                else:
+                    clean(table[key])
+        elif isinstance(table, list):
+            for item in table:
+                clean(item)
+    clean(config)
+    widgets = config.setdefault("widgets", {})
+    for placement in ("left", "center", "right"):
+        if placement in widgets:
+            widgets[placement] = [name for name in widgets[placement] if not name.startswith("custom-")]
+    widgets.setdefault("quick_settings", {})["brightness"] = False
+    widgets.setdefault("headset", {})["command"] = str(headset)
+    config.setdefault("updates", {})["flake"] = str(home / "absent-updates-flake")
+    return config
+
+def preview_config(source, theme, scale):
+    lines = []
+    for line in source.splitlines():
+        key, sep, body = line.partition("=")
+        key = key.strip()
+        if not sep or key.startswith("#"):
+            lines.append(line)
+            continue
+        if key in {"exec", "exec_once", "source", "monitor_rule", "env", "bindl"}:
+            continue
+        if key == "var" and body.strip().startswith("mainmod,"):
+            lines.append("var=mainmod,ALT")
+            continue
+        if key in {"bind", "bindr", "axisbind", "mousebind"}:
+            fields = [field.strip() for field in body.split(",", 3)]
+            if len(fields) < 3:
+                raise ValueError("invalid binding: " + line)
+            modifiers, button, action = fields[:3]
+            # These actions receive explicit preview bindings below.
+            if action in {"switcher", "switch_keyboard_layout"}:
+                continue
+            if button.lower() in {"space", "grave"} and "ALT" in modifiers.upper():
+                continue
+            if action.startswith("spawn"):
+                command = fields[3] if len(fields) == 4 else ""
+                args = shlex.split(command)
+                if args in [["topbar", "launcher"], ["topbar", "launcher", "toggle"], ["topbar", "popover", "show", "quick_settings"]]:
+                    pass
+                else:
+                    continue
+            elif action in {"toggle_named_scratchpad", "sleep_monitor", "wakeup_monitor", "switch_vt"}:
+                continue
+        lines.append(line)
+    # Production shortcuts remain otherwise untouched; these replace only
+    # host-facing launches and parent-grabbed modifier/capture shortcuts.
+    # Nested Wayland requires adaptive sync and inherits its mode from the parent.
+    lines.extend([
+        "var=mainmod,ALT",
+        "monitor_rule=name:^WL-[0-9]+$,vrr:1,scale:" + str(scale),
+        "bind=ALT,Return,spawn,mango-preview-terminal",
+        "bind=ALT,b,spawn,mango-preview-browser",
+        "bind=ALT,space,switch_keyboard_layout",
+        "bind=ALT+CTRL,space,switch_layout",
+        "bind=ALT+CTRL,grave,toggle_named_scratchpad,none,^kitty-scratch$,mango-preview-terminal -T kitty-scratch",
+        "bind=ALT+CTRL,Tab,switcher,all_next",
+        "bind=ALT+CTRL+SHIFT,Tab,switcher,all_prev",
+        "bind=ALT+CTRL,Print,spawn,mango-screenshot region",
+        "bind=ALT+CTRL+SHIFT,Print,spawn,mango-screenshot output",
+        "bind=ALT+CTRL,F12,spawn,mango-screenshot window",
+    ])
+    if theme is not None:
+        lines.append("source=" + str(theme))
+    return "\n".join(lines) + "\n"
+
+if sys.argv[1:] == ["--self-check"]:
+    original = {
+        "appearance": {"theme_command": ["/host/theme"]},
+        "theme": {"accent": "#abcdef"},
+        "widgets": {"left": ["workspaces", "custom-host"], "custom-host": {"exec": "/host/mutate"},
+                    "clock": {"on_click": "/host/callback"}, "headset": {"command": "/host/headset"}},
+        "updates": {"update_count_command": "/host/update"},
+        "advanced": {"mango": {"persistent_tags": [1, 2, 3], "keyboard_layouts": ["English (US)", "Russian"]}},
+    }
+    safe = sanitize(original, pathlib.Path("/private/home"), pathlib.Path("/private/no-headset"))
+    encoded = "\n".join(json.dumps(k) + " = " + value(v) for k, v in safe.items())
+    assert tomllib.loads(encoded) == safe
+    assert original["appearance"]["theme_command"] == ["/host/theme"]
+    assert "/host/" not in encoded and safe["widgets"]["left"] == ["workspaces"]
+    assert not safe["widgets"]["quick_settings"]["brightness"]
+    assert safe["advanced"] == original["advanced"]
+    fixture = """var=mainmod,SUPER
+exec_once=svc session-start
+monitor_rule=name:^DP-5$,scale:1.5
+source=/host/theme
+bindl=NONE,XF86AudioRaiseVolume,spawn,wpctl set-volume @DEFAULT_SINK@ 5%+
+bind=$mainmod,p,spawn,theme-switch
+bind=$mainmod+ALT,l,spawn_shell,pidof hyprlock || hyprlock --config /host/lock
+bind=$mainmod,e,spawn,topbar launcher toggle
+bind=$mainmod+SHIFT,p,spawn,wlopm --off '*'
+bind=$mainmod,Print,spawn,mango-screenshot region
+bind=NONE,Print,spawn,mango-screenshot region
+bind=CTRL,Print,spawn,mango-screenshot output
+bind=ALT,Print,spawn,mango-screenshot window
+bind=$mainmod,h,focusdir,left
+bind=ALT,Tab,switcher,all_next
+bind=$mainmod,Tab,switcher,all_next
+bind=$mainmod+SHIFT,Tab,switcher,all_prev
+bind=$mainmod+ALT,space,switch_layout
+"""
+    preview = preview_config(fixture, pathlib.Path("/bundle/mango.conf"), 1)
+    assert "svc" not in preview and "DP-5" not in preview and "/host" not in preview
+    assert "theme-switch" not in preview and "wpctl" not in preview
+    assert "bind=$mainmod,h,focusdir,left" in preview and "mango-screenshot region" in preview
+    assert "bind=ALT+CTRL,space,switch_layout" in preview
+    assert "bind=$mainmod+ALT,space" not in preview
+    assert "hyprlock" not in preview and "wlopm" not in preview
+    assert "topbar launcher toggle" in preview and "toggle_named_scratchpad,none,^kitty-scratch$" in preview
+    assert "bind=ALT,Tab," not in preview and "bind=$mainmod,Tab," not in preview
+    assert "bind=$mainmod+SHIFT,Tab," not in preview
+    assert "bind=NONE,Print," not in preview and "bind=CTRL,Print," not in preview and "bind=ALT,Print," not in preview
+    assert preview.count(",switcher,all_next") == 1 and preview.count(",switcher,all_prev") == 1
+    assert "bind=ALT+CTRL,Tab,switcher,all_next" in preview
+    assert "bind=ALT+CTRL+SHIFT,Tab,switcher,all_prev" in preview
+    for modifiers, button, mode in [("ALT+CTRL", "Print", "region"), ("ALT+CTRL+SHIFT", "Print", "output"), ("ALT+CTRL", "F12", "window")]:
+        assert f"bind={modifiers},{button},spawn,mango-screenshot {mode}" in preview
+        assert preview.count("mango-screenshot " + mode) == 1
+    print("preview config isolation self-check passed")
+    raise SystemExit
+
+panel_source, panel_target, mango_source, mango_target, private_home, scale = sys.argv[1:]
+home = pathlib.Path(private_home)
+source_path = pathlib.Path(panel_source)
+safe = sanitize(tomllib.loads(source_path.read_text()), home, home.parent / "no-headset")
+pathlib.Path(panel_target).write_text("\n".join(json.dumps(k) + " = " + value(v) for k, v in safe.items()) + "\n")
+theme = source_path.parent / "mango.conf"
+if mango_source and not theme.is_file():
+    raise SystemExit("TOPBAR_VISUAL_CONFIG must have its generated mango.conf beside it")
+if mango_source:
+    source = pathlib.Path(mango_source).read_text()
+else:
+    source = """xkb_rules_layout=us,ru
+xkb_rules_options=compose:ralt,ctrl:nocaps
+cursor_theme=Adwaita
+cursor_size=24
+tag_num=9
+tag_rule=id:1,layout_name:scroller,no_hide:1
+tag_rule=id:2,layout_name:scroller,no_hide:1
+tag_rule=id:3,layout_name:scroller,no_hide:1
+tag_rule=id:4,layout_name:scroller
+tag_rule=id:5,layout_name:scroller
+tag_rule=id:6,layout_name:scroller
+tag_rule=id:7,layout_name:scroller
+tag_rule=id:8,layout_name:scroller
+tag_rule=id:9,layout_name:scroller
+circle_layout=scroller,fair,dwindle
+scroller_default_proportion=0.5
+scroller_proportion_preset=0.33333,0.5,0.66667
+scratchpad_width_ratio=0.8
+scratchpad_height_ratio=0.9
+window_rule=title:^kitty-scratch$,is_named_scratchpad:1,width:0.8,height:0.9
+bind=ALT,q,killclient
+bind=ALT,o,toggleoverview
+"""
+    safe.setdefault("advanced", {}).setdefault("mango", {
+        "persistent_tags": [1, 2, 3], "keyboard_layouts": ["English (US)", "Russian"],
+    })
+    pathlib.Path(panel_target).write_text("\n".join(json.dumps(k) + " = " + value(v) for k, v in safe.items()) + "\n")
+pathlib.Path(mango_target).write_text(preview_config(source, theme if theme.is_file() else None, float(scale)))
+PREPARE
+}
+
+if [ "${1:-}" = --self-check ]; then
+  prepare_mango --self-check
+  exit
+fi
+
+compositor="${TOPBAR_SMOKE_COMPOSITOR:-niri}"
+case "$compositor" in
+  niri|mango) ;;
+  *) echo "TOPBAR_SMOKE_COMPOSITOR must be niri or mango" >&2; exit 1 ;;
+esac
+export TOPBAR_SMOKE_COMPOSITOR="$compositor"
+if [ "$compositor" = mango ] && [ "${TOPBAR_SMOKE_POWER:-}" != 1 ]; then
+  echo "Mango preview requires TOPBAR_SMOKE_POWER=1 (private power bus and sysfs)" >&2
+  exit 1
+fi
+
+# Resolve before boxing runtime. Only the nested backend gets this socket;
+# descendants receive the nested compositor's own WAYLAND_DISPLAY.
+case "${WAYLAND_DISPLAY:-}" in
+  /*) parent_wayland="$WAYLAND_DISPLAY" ;;
+  "") echo "a real parent WAYLAND_DISPLAY is required" >&2; exit 1 ;;
+  *) parent_wayland="${XDG_RUNTIME_DIR:?parent XDG_RUNTIME_DIR is required}/$WAYLAND_DISPLAY" ;;
+esac
+if [ ! -S "$parent_wayland" ]; then
+  echo "parent Wayland display is not a socket: $parent_wayland" >&2
+  exit 1
+fi
+parent_wayland=$(realpath "$parent_wayland")
+export WAYLAND_DISPLAY="$parent_wayland"
+unset WAYLAND_SOCKET DISPLAY XAUTHORITY NIRI_SOCKET MANGO_INSTANCE_SIGNATURE
+unset SWAYSOCK HYPRLAND_INSTANCE_SIGNATURE
+unset PULSE_SERVER PULSE_REMOTE PULSE_RUNTIME_PATH PULSE_CLIENTCONFIG PULSE_COOKIE
+unset PIPEWIRE_REMOTE PIPEWIRE_RUNTIME_DIR
+unset DBUS_STARTER_ADDRESS DBUS_STARTER_BUS_TYPE TOPBAR_SMOKE_POWER_BUS TOPBAR_SMOKE_POWER_SYSFS
+unset TOPBAR_SMOKE_NM_BUS TOPBAR_SMOKE_BLUEZ_BUS
+export XDG_CURRENT_DESKTOP="$compositor" XDG_SESSION_DESKTOP="$compositor" XDG_SESSION_TYPE=wayland
+export WLR_BACKENDS=wayland
+export XCURSOR_THEME=Adwaita XCURSOR_SIZE=24
 artifact_dir="${1:-target/visual-smoke}"
 config="${TOPBAR_VISUAL_CONFIG:-config.toml}"
 driver="${TOPBAR_SMOKE_DRIVER:-}"
 timeout_s="${TOPBAR_SMOKE_TIMEOUT:-30}"
 mkdir -p "$artifact_dir"
-rm -f "$artifact_dir/backend-ok"
+rm -f "$artifact_dir/backend-ok" "$artifact_dir/driver-failed"
 
 bus_config=$(pwd)/scripts/smoke-session.conf
+
+# Capture only the selected image before boxing the host's cache and HOME.
+SMOKE_WALLPAPER_SOURCE=""
+if [ "$compositor" = mango ]; then
+  wallpaper_pointer="${XDG_CACHE_HOME:-$HOME/.cache}/wallpaper/current.png"
+  if wallpaper_source=$(realpath "$wallpaper_pointer" 2>/dev/null) &&
+      [ -f "$wallpaper_source" ] && [ -r "$wallpaper_source" ]; then
+    SMOKE_WALLPAPER_SOURCE="$wallpaper_source"
+  else
+    echo "Mango preview: no readable current wallpaper at $wallpaper_pointer; keeping plain background" >&2
+  fi
+fi
+export SMOKE_WALLPAPER_SOURCE
 
 # Sandbox every XDG write path. The panel migrates/creates state dirs and will
 # grow cache use over time; a smoke run must never touch the developer's real
@@ -150,12 +386,33 @@ bus_config=$(pwd)/scripts/smoke-session.conf
 # XDG_CONFIG_HOME is boxed too so the legacy-path fallback can't find a real
 # user config and add warning noise to panel.log.
 xdg_box=$(mktemp -d "${TMPDIR:-/tmp}/topbar-smoke-xdg.XXXXXX")
-trap 'rm -rf "$xdg_box"' EXIT INT TERM
+# The supervisor drains descendants while the private bus and runtime still
+# exist. Signals reach it, not dbus-run-session, so bus teardown happens last.
+session_pid=""
+cleanup_outer() {
+  if [ -n "$session_pid" ]; then
+    if [ -f "$xdg_box/supervisor.pid" ]; then
+      read -r supervisor_pid <"$xdg_box/supervisor.pid"
+      kill -TERM "$supervisor_pid" 2>/dev/null || true
+    else
+      kill -TERM "$session_pid" 2>/dev/null || true
+    fi
+    wait "$session_pid" 2>/dev/null || true
+  fi
+  if [ -d "$xdg_box/home/Pictures/Screenshots" ]; then
+    mkdir -p "$artifact_dir/screenshots"
+    cp -a "$xdg_box/home/Pictures/Screenshots"/. "$artifact_dir/screenshots"/
+  fi
+  rm -rf "$xdg_box"
+}
+trap cleanup_outer EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 export XDG_STATE_HOME="$xdg_box/state"
 export XDG_CACHE_HOME="$xdg_box/cache"
 export XDG_CONFIG_HOME="$xdg_box/config"
 export XDG_DATA_HOME="$xdg_box/data"
-mkdir -p "$XDG_STATE_HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME/niri" "$XDG_DATA_HOME"
+mkdir -p "$XDG_STATE_HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME/niri" "$XDG_CONFIG_HOME/mango" "$XDG_DATA_HOME"
 
 # GIO discovers desktop entries through XDG_DATA_HOME.  Copy an explicit
 # fixture tree when a launcher scenario supplies one, so it cannot pick up a
@@ -168,22 +425,14 @@ if [ -n "${TOPBAR_SMOKE_DATA:-}" ]; then
   cp -a "$TOPBAR_SMOKE_DATA"/. "$XDG_DATA_HOME"/
 fi
 
-# The runtime directory is boxed too, so the panel's single-instance lock and
-# its IPC socket land inside the run and nowhere near a real panel's. The host
-# compositor's socket is linked in first, because the nested niri finds it
-# through exactly this variable.
-host_runtime="${XDG_RUNTIME_DIR:-}"
+# Never link the parent runtime directory or either of its manager sockets.
 export XDG_RUNTIME_DIR="$xdg_box/run"
 mkdir -p "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
-if [ -n "$host_runtime" ] && [ -n "${WAYLAND_DISPLAY:-}" ]; then
-  for suffix in "" ".lock"; do
-    if [ -e "$host_runtime/$WAYLAND_DISPLAY$suffix" ]; then
-      ln -sf "$host_runtime/$WAYLAND_DISPLAY$suffix" \
-        "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY$suffix"
-    fi
-  done
-fi
+export DBUS_SYSTEM_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/no-system-bus"
+export PULSE_SERVER="unix:$XDG_RUNTIME_DIR/no-pulse-server"
+export PIPEWIRE_REMOTE="$XDG_RUNTIME_DIR/no-pipewire-server"
+export PIPEWIRE_RUNTIME_DIR="$XDG_RUNTIME_DIR"
 
 # The /etc/os-release the updates service reads, so a run can be on Arch or
 # Debian without the machine being either. The panel is pointed at the copy
@@ -277,12 +526,29 @@ output "winit" {
 }
 KDL
 
-for tool in niri grim cargo timeout dbus-run-session; do
+for tool in "$compositor" grim cargo dbus-run-session python3 setsid realpath; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "missing required tool: $tool" >&2
     exit 1
   fi
 done
+if [ "$compositor" = mango ]; then
+  for tool in mmsg kitty brave jq wl-copy slurp satty; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      echo "missing required Mango preview tool: $tool" >&2
+      exit 1
+    fi
+  done
+  if [ -n "$SMOKE_WALLPAPER_SOURCE" ]; then
+    for tool in awww awww-daemon; do
+      if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "missing required Mango wallpaper tool: $tool" >&2
+        exit 1
+      fi
+    done
+  fi
+  : "${XCURSOR_PATH:?export the built Adwaita share/icons path (the dev shell does this)}"
+fi
 
 cargo build -p topbar
 
@@ -327,20 +593,69 @@ driver_abs=""
 if [ -n "$driver" ]; then
   driver_abs=$(cd "$(dirname "$driver")" && pwd)/$(basename "$driver")
 fi
+if [ "$compositor" = mango ]; then
+  mango_source="${TOPBAR_SMOKE_MANGO_CONFIG:-}"
+  if [ -n "$mango_source" ]; then
+    mango_source=$(realpath "$mango_source")
+    dotfiles_root=$(dirname "$(dirname "$(dirname "$(dirname "$mango_source")")")")
+  else
+    dotfiles_root="$(pwd)/../dotfiles"
+  fi
+  helper="$dotfiles_root/bin/.local/bin/mango-screenshot"
+  if [ ! -x "$helper" ]; then
+    echo "missing executable source screenshot helper: $helper" >&2
+    exit 1
+  fi
+  mkdir -p "$xdg_box/bin"
+  cp "$helper" "$xdg_box/bin/mango-screenshot"
+  ln -s "$binary_abs" "$xdg_box/bin/topbar"
+  export SMOKE_KITTY="$(command -v kitty)" SMOKE_BRAVE="$(command -v brave)"
+  cat >"$xdg_box/bin/mango-preview-terminal" <<'TERMINAL'
+#!/usr/bin/env sh
+exec "$SMOKE_KITTY" --config NONE "$@"
+TERMINAL
+  cat >"$xdg_box/bin/mango-preview-browser" <<'BROWSER'
+#!/usr/bin/env sh
+exec "$SMOKE_BRAVE" --user-data-dir="$HOME/.cache/brave-preview" --no-first-run --disable-sync "$@"
+BROWSER
+  chmod +x "$xdg_box/bin/mango-preview-terminal" "$xdg_box/bin/mango-preview-browser"
+  export PATH="$xdg_box/bin:$PATH"
+  prepare_mango "$config_abs" "$xdg_box/panel.toml" "$mango_source" \
+    "$XDG_CONFIG_HOME/mango/config.conf" "$xdg_box/home" "${TOPBAR_SMOKE_SCALE:-0.75}"
+  config_abs="$xdg_box/panel.toml"
+  mkdir -p "$XDG_CONFIG_HOME/topbar"
+  cp "$config_abs" "$XDG_CONFIG_HOME/topbar/config.toml"
+  cp "$config_abs" "$artifact_dir_abs/preview-panel.toml"
+  cp "$XDG_CONFIG_HOME/mango/config.conf" "$artifact_dir_abs/preview-mango.conf"
+  mango -c "$XDG_CONFIG_HOME/mango/config.conf" -p >"$artifact_dir_abs/mango-config.log" 2>&1
+fi
 
-# niri detaches the stdio of the processes it spawns, so the panel's own log
-# (and any GTK CSS warning) is captured to a file instead of the terminal.
-timeout "${timeout_s}s" dbus-run-session --config-file="$bus_config" -- niri -- sh -c '
+# Build first, then give every compositor descendant a disposable home.
+export HOME="$xdg_box/home"
+export ZDOTDIR="$HOME"
+mkdir -p "$HOME"
+if [ "$compositor" = mango ]; then
+  "$binary_abs" --config "$config_abs" --check-config --strict
+fi
+
+cat >"$xdg_box/inner.sh" <<'INNER'
+#!/usr/bin/env sh
 set -eu
 export SMOKE_ARTIFACTS="$3"
 export SMOKE_FAKE_PLAYER="$5"
 export SMOKE_FAKE_SNI="$6"
 export SMOKE_TOPBAR="$1"
 export SMOKE_CONFIG="$2"
-printf "NIRI_SOCKET=%s\nWAYLAND_DISPLAY=%s\n" "${NIRI_SOCKET:-}" "${WAYLAND_DISPLAY:-}" \
-  >"$3/niri-environment.txt"
-if [ -z "${NIRI_SOCKET:-}" ] || [ ! -S "$NIRI_SOCKET" ]; then
-  echo "nested niri did not provide a live IPC socket" >&2
+printf "COMPOSITOR=%s\nXDG_CURRENT_DESKTOP=%s\nNIRI_SOCKET=%s\nMANGO_INSTANCE_SIGNATURE=%s\nWAYLAND_DISPLAY=%s\n" \
+  "$TOPBAR_SMOKE_COMPOSITOR" "$XDG_CURRENT_DESKTOP" "${NIRI_SOCKET:-}" \
+  "${MANGO_INSTANCE_SIGNATURE:-}" "${WAYLAND_DISPLAY:-}" >"$3/compositor-environment.txt"
+cp "$3/compositor-environment.txt" "$3/$TOPBAR_SMOKE_COMPOSITOR-environment.txt"
+case "$TOPBAR_SMOKE_COMPOSITOR" in
+  niri) instance="${NIRI_SOCKET:-}" ;;
+  mango) instance="${MANGO_INSTANCE_SIGNATURE:-}" ;;
+esac
+if [ -z "$instance" ] || [ ! -S "$instance" ]; then
+  echo "nested $TOPBAR_SMOKE_COMPOSITOR did not provide a live IPC socket" >&2
   exit 1
 fi
 export SMOKE_FAKE_NM="${10}"
@@ -354,13 +669,18 @@ if [ -n "${SMOKE_PATH:-}" ]; then
   export PATH
 fi
 
+awww_pid=""
 cleanup() {
-  for child in "${panel_pid:-}" "${bluez_pid:-}" "${nm_pid:-}" "${power_pid:-}" "${pulse_pid:-}"; do
+  for child in "${panel_pid:-}" "$awww_pid" "${bluez_pid:-}" "${nm_pid:-}" "${power_pid:-}" "${pulse_pid:-}"; do
     if [ -n "$child" ]; then
       kill "$child" 2>/dev/null || true
       wait "$child" 2>/dev/null || true
     fi
   done
+  case "$TOPBAR_SMOKE_COMPOSITOR" in
+    niri) niri msg action quit --skip-confirmation >/dev/null 2>&1 || true ;;
+    mango) mmsg dispatch quit >/dev/null 2>&1 || true ;;
+  esac
 }
 trap cleanup EXIT
 trap "exit 130" INT
@@ -415,8 +735,11 @@ if [ -n "$8" ]; then
   printf "Mains\n" >"$SMOKE_POWER_SYSFS/AC/type"
   printf "0\n" >"$SMOKE_POWER_SYSFS/AC/online"
 
+  # `1` enables default fixtures; scenario flag strings retain their argv.
+  power_args=$9
+  if [ "$power_args" = 1 ]; then power_args=""; fi
   # shellcheck disable=SC2086
-  "$8" --sysfs "$SMOKE_POWER_SYSFS" $9 >"$3/fake-power.log" 2>&1 &
+  "$8" --sysfs "$SMOKE_POWER_SYSFS" $power_args >"$3/fake-power.log" 2>&1 &
   power_pid=$!
   # The panel finds both fakes on the session bus rather than on the system
   # one. Debug builds only; the packaged binary ignores these entirely.
@@ -428,6 +751,14 @@ if [ -n "$8" ]; then
     sleep 0.1
     waited=$((waited + 1))
   done
+  grep -q "^ready$" "$3/fake-power.log" || {
+    echo "private fake power service never became ready" >&2
+    exit 1
+  }
+fi
+if [ "$TOPBAR_SMOKE_COMPOSITOR" = mango ]; then
+  test -n "${TOPBAR_SMOKE_POWER_BUS:-}"
+  test "$TOPBAR_SMOKE_POWER_SYSFS" = "$XDG_RUNTIME_DIR/power_supply"
 fi
 
 bluez_pid=""
@@ -464,44 +795,137 @@ if [ -n "${10}" ]; then
   done
 fi
 
+if [ "$TOPBAR_SMOKE_COMPOSITOR" = mango ] && [ -n "$SMOKE_WALLPAPER_SOURCE" ]; then
+  # Native clients inherit only this preview's runtime, cache and HOME.
+  awww-daemon -n normal --no-cache >"$3/awww.log" 2>&1 &
+  awww_pid=$!
+  waited=0
+  while ! awww query -n normal >/dev/null 2>&1 && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  awww query -n normal >/dev/null 2>&1 || {
+    echo "private Mango wallpaper daemon never became ready; see $3/awww.log" >&2
+    exit 1
+  }
+  awww img -n normal --resize crop --transition-type none "$SMOKE_WALLPAPER_SOURCE"
+fi
+
 "$1" --config "$2" -v >"$3/panel.log" 2>&1 &
 panel_pid=$!
 # The driver reads /proc/$SMOKE_PANEL_PID/status to watch the panel grow.
 export SMOKE_PANEL_PID="$panel_pid"
 # Backend selection is part of the proof, not something a screenshot can show.
 python3 - "$1" "$3/compositor.json" <<"PY"
-import json, pathlib, subprocess, sys, time
+import json, os, pathlib, subprocess, sys, time
 deadline = time.monotonic() + 20
 while time.monotonic() < deadline:
     result = subprocess.run([sys.argv[1], "dump", "state", "--json"], capture_output=True, text=True)
     if result.returncode == 0:
         state = json.loads(result.stdout)
         compositor = state["compositor"]
-        if compositor["backend"] == "niri" and compositor["connected"]:
+        if (compositor["backend"] == os.environ["TOPBAR_SMOKE_COMPOSITOR"]
+                and compositor["connected"] and compositor["focused_output"]):
             pathlib.Path(sys.argv[2]).write_text(result.stdout)
             break
     time.sleep(0.1)
 else:
-    raise SystemExit("nested Niri panel never selected a connected niri backend")
+    raise SystemExit("nested " + os.environ["TOPBAR_SMOKE_COMPOSITOR"] + " preview never became connected with a focused output")
 PY
 touch "$3/backend-ok"
 if [ -n "$4" ]; then
-  # niri detaches the stdio of what it spawns, so the driver is captured the
-  # same way the panel is. A driver that failed silently was how a broken
-  # screenshot went unnoticed for a whole run.
-  sh "$4" >"$3/driver.log" 2>&1 || echo "smoke driver failed with status $?" >>"$3/driver.log"
+  # Both compositors detach child stdio; preserve driver failures explicitly.
+  sh "$4" >"$3/driver.log" 2>&1 || {
+    status=$?
+    echo "smoke driver failed with status $status" >>"$3/driver.log"
+    touch "$3/driver-failed"
+    exit "$status"
+  }
 else
   grim "$3/topbar.png"
 fi
 cleanup
 trap - EXIT
-niri msg action quit --skip-confirmation >/dev/null 2>&1 || true
-' sh "$binary_abs" "$config_abs" "$artifact_dir_abs" "$driver_abs" "$player_abs" "$sni_abs" \
+INNER
+
+# Mango's session imports/cleanup are asynchronous, including in nested mode.
+# Linux subreaping lets this one supervisor drain only this run's descendants
+# before dbus-run-session removes the bus; setsid shields that bus from Ctrl+C.
+cat >"$xdg_box/supervisor.py" <<'SUPERVISOR'
+import ctypes, os, pathlib, shlex, signal, subprocess, sys, time
+
+libc = ctypes.CDLL(None, use_errno=True)
+if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+    raise OSError(ctypes.get_errno(), "could not enable preview child subreaping")
+kind, executable, config, runner, seconds, pidfile, *args = sys.argv[1:]
+pathlib.Path(pidfile).write_text(str(os.getpid()) + "\n")
+stopping = False
+def stop(signum, frame):
+    global stopping
+    stopping = True
+signal.signal(signal.SIGTERM, stop)
+signal.signal(signal.SIGINT, stop)
+seconds = float(seconds)
+if seconds <= 0:
+    raise SystemExit("TOPBAR_SMOKE_TIMEOUT must be positive")
+command = [executable, "--", "sh", runner, *args] if kind == "niri" else [
+    executable, "-d", "-c", config, "-s", shlex.join(["sh", runner, *args]),
+]
+process = subprocess.Popen(command)
+deadline = time.monotonic() + seconds
+timed_out = False
+try:
+    while process.poll() is None:
+        if stopping or time.monotonic() >= deadline:
+            timed_out = not stopping
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            break
+        time.sleep(0.1)
+finally:
+    # All PIDs read here are this supervisor's children, including adopted
+    # setsid descendants. Never match process names or touch the host session.
+    children_file = pathlib.Path(f"/proc/{os.getpid()}/task/{os.getpid()}/children")
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            while os.waitpid(-1, os.WNOHANG)[0]:
+                pass
+        except ChildProcessError:
+            break
+        sig = signal.SIGTERM if time.monotonic() < deadline else signal.SIGKILL
+        for child in children_file.read_text().split():
+            try:
+                os.kill(int(child), sig)
+            except ProcessLookupError:
+                pass
+        time.sleep(0.05)
+raise SystemExit(124 if timed_out else 0 if stopping else process.returncode)
+SUPERVISOR
+
+setsid --wait dbus-run-session --config-file="$bus_config" -- \
+  python3 "$xdg_box/supervisor.py" "$compositor" "$(command -v "$compositor")" \
+  "$XDG_CONFIG_HOME/mango/config.conf" "$xdg_box/inner.sh" "$timeout_s" "$xdg_box/supervisor.pid" \
+  "$binary_abs" "$config_abs" "$artifact_dir_abs" "$driver_abs" "$player_abs" "$sni_abs" \
   "${TOPBAR_SMOKE_PULSE:-}" "$power_abs" "${TOPBAR_SMOKE_POWER:-}" \
-  "$nm_abs" "${TOPBAR_SMOKE_NM:-}" "$bluez_abs" "${TOPBAR_SMOKE_BLUEZ:-}"
+  "$nm_abs" "${TOPBAR_SMOKE_NM:-}" "$bluez_abs" "${TOPBAR_SMOKE_BLUEZ:-}" \
+  >"$artifact_dir_abs/compositor.log" 2>&1 &
+session_pid=$!
+status=0
+wait "$session_pid" || status=$?
+session_pid=""
+if [ "$status" -ne 0 ]; then
+  echo "nested $compositor exited with status $status; see $artifact_dir_abs/compositor.log" >&2
+  exit "$status"
+fi
+test ! -f "$artifact_dir_abs/driver-failed"
 
 test -f "$artifact_dir_abs/backend-ok" || {
-  echo "nested Niri backend assertion did not complete" >&2
+  echo "nested $compositor backend assertion did not complete" >&2
   exit 1
 }
 echo "--- panel log ---"

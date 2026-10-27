@@ -1,14 +1,10 @@
 //! Shared layer-shell ownership for panel dialogs and the launcher.
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use gtk4::prelude::*;
 use gtk4::{Window, gdk, glib};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
-use niri_ipc::{Reply, Request, Response};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 use tokio::time::timeout;
 use topbar_services::Runtime;
 use topbar_services::ipc::InputLock;
@@ -62,27 +58,17 @@ pub fn monitor_of(anchor: &impl IsA<gtk4::Widget>) -> Option<gdk::Monitor> {
         .or_else(|| display.monitors().item(0).and_downcast::<gdk::Monitor>())
 }
 
-/// Ask niri which output is focused before a standalone GTK loop starts.
+/// Ask the compositor which output is focused before a standalone GTK loop starts.
 /// A missing or stalled compositor leaves monitor selection to GDK's fallback.
 pub fn focused_output_connector() -> Option<String> {
-    let socket = PathBuf::from(std::env::var_os("NIRI_SOCKET")?);
     Runtime::handle().block_on(async {
-        timeout(Duration::from_millis(250), async {
-            let mut stream = UnixStream::connect(socket).await.ok()?;
-            let mut request = serde_json::to_vec(&Request::FocusedOutput).ok()?;
-            request.push(b'\n');
-            stream.write_all(&request).await.ok()?;
-            let mut reader = BufReader::new(stream);
-            let mut line = String::new();
-            reader.read_line(&mut line).await.ok()?;
-            let reply: Reply = serde_json::from_str(&line).ok()?;
-            match reply {
-                Ok(Response::FocusedOutput(Some(output))) => Some(output.name),
-                _ => None,
-            }
-        })
+        timeout(
+            Duration::from_millis(250),
+            topbar_services::compositor::focused_output_connector("auto"),
+        )
         .await
         .ok()
+        .and_then(Result::ok)
         .flatten()
     })
 }

@@ -69,10 +69,17 @@ pub struct Slot {
     pub label: Option<String>,
     /// Whether this slot gets the pill.
     pub is_active: bool,
-    /// Only the globally focused slot may ignore a click.
+    /// Whether this is the globally focused workspace.
     pub is_focused: bool,
     /// Whether this slot wants attention.
     pub is_urgent: bool,
+}
+
+impl Slot {
+    /// Niri skips focused clicks to avoid auto-back-and-forth; Mango leaves overview.
+    pub fn click_target(&self, is_niri: bool) -> Option<WorkspaceId> {
+        (!is_niri || !self.is_focused).then_some(self.id)
+    }
 }
 
 /// What the widget's configuration says about which workspaces to show.
@@ -324,6 +331,31 @@ mod tests {
             show_unoccupied: false,
             label_type: LabelType::None,
         }
+    }
+
+    #[test]
+    fn focused_clicks_are_skipped_only_for_niri() {
+        let mut slot = Slot {
+            id: 7,
+            label: None,
+            is_active: true,
+            is_focused: true,
+            is_urgent: false,
+        };
+        assert_eq!(slot.click_target(true), None, "Niri must not toggle back");
+        assert_eq!(
+            slot.click_target(false),
+            Some(7),
+            "Mango must leave overview"
+        );
+
+        slot.is_focused = false;
+        assert_eq!(
+            slot.click_target(true),
+            Some(7),
+            "Niri must focus an active workspace on another output"
+        );
+        assert_eq!(slot.click_target(false), Some(7));
     }
 
     #[test]

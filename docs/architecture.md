@@ -19,7 +19,7 @@ configuration key goes.
 │ topbar-services — everything outward    │   │
 │   runtime  lazy  lifecycle  ipc  proc   │   │
 │   audio/ battery/ bluetooth/ network/   │   │
-│   niri/ notifications/ tray/ updates/ … │   │
+│   niri/ mango/ notifications/ tray/ …   │   │
 │   tokio, zbus  —  NEVER gtk4            │   │
 └───────────────┬─────────────────────────┘   │
                 ▼                             ▼
@@ -39,9 +39,9 @@ owns the configuration schema and its v1 compatibility surface, the reload
 delta, the CLI/panel wire protocol, theme colour primitives, the pure layout
 arithmetic, xkb layout names, and logging setup.
 
-`topbar-services` owns everything that talks outward: D-Bus, niri, PulseAudio,
-PipeWire, subprocesses, the network. It has **no** `gtk4` dependency, and that
-missing edge in `Cargo.toml` is what makes it impossible for a service task to
+`topbar-services` owns everything that talks outward: D-Bus, niri, Mango,
+PulseAudio, PipeWire, subprocesses, the network. It has **no** `gtk4` dependency.
+That missing edge in `Cargo.toml` makes it impossible for a service task to
 touch a widget — there is no discipline to remember, because the type does not
 exist in that crate. State reaches `topbar`, the GTK application, only as
 `Send + Clone` handles and `Arc<Snapshot>` values. `tokio::sync::watch` is
@@ -109,8 +109,8 @@ draw this" already has an answer in the file. A `clock` with
 `control_panel = true` is what asks for the weather and media services, because
 the control panel is what draws them. Everything absent from `Demand` is
 unconditional, each for a reason: audio, brightness and the inhibitor answer
-`topbar volume`/`brightness`/`inhibit` with no bar in sight; niri drives the OSD
-and every per-output decision; notifications is a *role* on the session bus
+`topbar volume`/`brightness`/`inhibit` with no bar in sight; the compositor drives
+the OSD and every per-output decision; notifications is a *role* on the session bus
 rather than a widget; and the network is what connectivity is projected from,
 which weather, crypto and `requires_network` scripts all gate on.
 
@@ -119,6 +119,47 @@ reload and starts whatever the new configuration now draws. Nothing ever stops
 a service again: a widget taken off the bar is far more likely to come back
 than to have cost anything by staying subscribed, and "stopped" has no good
 meaning for a pairing agent, a tray host or a state file.
+
+## Compositor boundary
+
+`Compositor` is the shared boundary for workspace, window, keyboard-layout, and
+focused-output operations. Existing niri integration remains in `niri/`; Mango
+0.18.2 lives in `mango/`. Widgets and standalone commands select through that
+boundary rather than assuming niri. Explicit backend selection is authoritative;
+automatic selection uses `XDG_CURRENT_DESKTOP` identity first and falls back to a
+single connection marker only when that identity is empty. It never probes socket
+existence to choose a different compositor.
+
+Mango's workspace identity is an output/tag pair. A connector receives a `u32`
+slot that is never reused for another connector in the process's lifetime;
+`WorkspaceId = (slot << 32) | one_based_tag`. The connector-to-slot map survives
+reconnects and output reordering, so stale IDs cannot silently become another
+monitor's tag. Commands query and validate the exact live target before and
+after mutations rather than translating an ID through a cached monitor index.
+The live monitor must also have positive width and height before activation:
+disabled Mango outputs retain their object and tags, but cannot be focus targets.
+Stock `viewcrossmon` still has a hot-unplug race inside the compositor between
+those checks. A detected target change is an error with no retry or compensating
+mutation, not a claim of atomic no-redirection.
+
+`topbar_core::config::MangoConfig` carries only metadata the stock protocol does
+not enumerate: `persistent_tags: Vec<u32>` and `keyboard_layouts: Vec<String>`,
+both empty by default. The latter is the exact full-name layout order configured
+in Mango, not an instruction to reconfigure the keyboard. Without it the
+published layout count is zero and switching is disabled, while workspaces and
+windows stay live. With at least two metadata names, next uses native cycling
+even if the current description is absent from the list; previous resolves the
+live full description by exact equality before selecting its predecessor.
+An unknown name makes previous fail visibly without mutation rather than guessing
+an index. Fewer than two names disable both actions.
+
+Mango uses a fresh one-shot socket for each query or dispatch. One shared action
+mutex serializes topbar's complete mutation sequences, including their live
+queries and postcondition checks, so overlapping keyboard or focus actions cannot
+interleave their read/modify steps. Waiting for the mutex is included in the
+whole action's two-second deadline. Watch streams remain independent. This gate
+does not make actions atomic against external compositor input or hot-unplug,
+and ambiguous mutations are never retried.
 
 ## Lifecycle
 
@@ -146,7 +187,7 @@ vetoing a shutdown or delaying a lid switch.
 
 `Services::wake_on_resume` is the fan-out. It watches the resume *counter*
 rather than a flag, because two resumes in quick succession must not look like
-one, and on each increment calls `Services::wake`: the niri stream's health
+one, and on each increment calls `Services::wake`: the compositor stream's health
 check, then the resource sampler discarding its CPU delta (which spans the sleep
 and is meaningless), then the headset, the battery, the update count, and last
 the two that reach the network. The clock is deliberately not in the list — its
@@ -299,6 +340,13 @@ a bar that does not have to, because a rebuilt bar closes whatever popover was
 open and restarts every widget's timers. An invalid configuration changes
 **nothing** — the running config stays as it was, one banner names the first
 error, the whole list goes to the log, and there is no partial application.
+
+The compositor selector and both `[advanced.mango]` lists are startup-only.
+`Reloader::install` checks them before computing or applying the delta and before
+replacing the shared configuration. A change rejects the whole candidate,
+including otherwise valid theme, widget, or Pango changes. With those startup
+settings unchanged, `advanced.pango_font_rendering` keeps its existing live
+bar-rebuild route.
 
 ## IPC and CLI resilience
 

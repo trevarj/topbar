@@ -5,15 +5,44 @@
 set -eu
 
 if [ -z "${SMOKE_PANEL_PID:-}" ] || [ -z "${SMOKE_ARTIFACTS:-}" ]; then
-  export TOPBAR_SMOKE_OPEN=clock
-  export TOPBAR_SMOKE_PLAYERS=1
+  if [ "${TOPBAR_SMOKE_COMPOSITOR:-niri}" = mango ]; then
+    export TOPBAR_SMOKE_POWER="${TOPBAR_SMOKE_POWER:-1}"
+    export TOPBAR_VISUAL_CONFIG="${TOPBAR_VISUAL_CONFIG:-config.toml}"
+  else
+    export TOPBAR_SMOKE_OPEN=clock
+    export TOPBAR_SMOKE_PLAYERS=1
+    export TOPBAR_VISUAL_CONFIG="${TOPBAR_VISUAL_CONFIG:-crates/topbar-core/tests/fixtures/live-config.toml}"
+  fi
   export TOPBAR_SMOKE_TIMEOUT="${TOPBAR_SMOKE_TIMEOUT:-3600}"
-  export TOPBAR_VISUAL_CONFIG="${TOPBAR_VISUAL_CONFIG:-crates/topbar-core/tests/fixtures/live-config.toml}"
   export TOPBAR_SMOKE_DRIVER="$0"
   exec ./scripts/visual-smoke-niri.sh "${1:-target/visual-smoke/playground}"
 fi
 
 art=$(cd "$SMOKE_ARTIFACTS" && pwd)
+if [ "${TOPBAR_SMOKE_COMPOSITOR:-niri}" = mango ]; then
+  terminal_pids=""
+  for number in 1 2 3; do
+    mango-preview-terminal -o cursor_blink_interval=0 -T "mango-preview-$number" \
+      >"$art/kitty-$number.log" 2>&1 &
+    terminal_pids="$terminal_pids $!"
+  done
+  cleanup() {
+    for child in $terminal_pids; do
+      kill "$child" 2>/dev/null || true
+      wait "$child" 2>/dev/null || true
+    done
+  }
+  trap cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  . "$(dirname "$0")/smoke-shot.sh"
+  shot playground
+  echo "Mango ready: Alt primary; Alt+Ctrl+Space layouts; Alt+Ctrl+grave scratchpad."
+  echo "MRU: Alt+Ctrl+Tab / +Shift reverse. Capture: Alt+Ctrl+Print region, +Shift output, Alt+Ctrl+F12 window."
+  echo "Private screenshots are copied to $art/screenshots when the preview stops."
+  while kill -0 "$SMOKE_PANEL_PID" 2>/dev/null; do sleep 1; done
+  exit
+fi
 magick -size 512x512 'gradient:#355c7d-#c06c84' "$art/cover.png"
 "$SMOKE_FAKE_PLAYER" --name playground --identity "Aurora Player" \
   --desktop-entry org.gnome.Music \

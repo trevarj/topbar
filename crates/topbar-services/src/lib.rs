@@ -27,6 +27,7 @@ pub mod ipc;
 mod lazy;
 pub mod lifecycle;
 pub mod logind;
+pub mod mango;
 pub mod media;
 pub mod network;
 pub mod niri;

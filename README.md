@@ -1,7 +1,7 @@
 <h1 align="center">
   <img src="assets/topbar.png" width="224" height="112" alt="topbar">
 </h1>
-<p align="center">A GNOME Shell-inspired top bar for niri.</p>
+<p align="center">A GNOME Shell-inspired top bar for niri and Mango.</p>
 <p align="center">
   <a href="https://github.com/trevarj/topbar/actions/workflows/ci.yml"><img src="https://github.com/trevarj/topbar/actions/workflows/ci.yml/badge.svg?branch=master" alt="CI status on master"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
@@ -13,7 +13,7 @@
 </p>
 <p align="center">Not affiliated with or endorsed by the GNOME Project.</p>
 
-**Contents:** [Screenshots](#screenshots) · [Features](#features) · [Install](#install) · [Running under niri](#running-under-niri) · [Configuration](#configuration) · [Links](#links) · [License](#license)
+**Contents:** [Screenshots](#screenshots) · [Features](#features) · [Install](#install) · [Running under niri](#running-under-niri) · [Running under Mango](#running-under-mango) · [Configuration](#configuration) · [Links](#links) · [License](#license)
 
 ## Screenshots
 
@@ -130,11 +130,35 @@ layer-rule {
 
 </details>
 
+## Running under Mango
+
+Mango 0.18.2 is supported alongside niri. Run `topbar` from your Mango session;
+if automatic desktop detection cannot identify it, select the backend explicitly:
+
+```toml
+[advanced]
+compositor = "mango"
+
+[advanced.mango]
+# Optional: keep these one-based tags visible when empty.
+# persistent_tags = [1, 2, 3]
+# Optional: exact full XKB names in Mango's configured order.
+# keyboard_layouts = ["English (US)", "Russian"]
+```
+
+Both metadata lists default to empty. Without keyboard metadata, workspace and
+window integration still work, but keyboard switching is disabled. Selecting a
+different backend or changing either metadata list requires restarting topbar;
+a reload rejects the entire candidate without applying other changes.
+See the [backend and metadata reference](docs/configuration.md#advanced) for
+automatic selection, keyboard semantics, and the stock Mango hot-unplug race.
+
 ## Configuration
 
 Configuration lives at `~/.config/topbar/config.toml`. Every key is optional;
-omitted keys use built-in defaults. Changes apply live, and an invalid file
-leaves the last valid configuration running.
+omitted keys use built-in defaults. Changes apply live, except the compositor
+selector and Mango metadata, which require a restart. An invalid file leaves
+the last valid configuration running.
 
 The control center shown above is opt-in:
 

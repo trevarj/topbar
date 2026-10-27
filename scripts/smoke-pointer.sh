@@ -1,4 +1,4 @@
-# Synthetic pointer and keyboard for the nested-niri smoke drivers. Source it,
+# Synthetic pointer and keyboard for the nested Wayland smoke drivers. Source it,
 # do not run it: `. "$(dirname "$0")/smoke-pointer.sh"`.
 #
 # Until this existed there was no way to *click* anything in a smoke run. Every
@@ -65,6 +65,16 @@ pointer_available() {
 # The JSON carries the logical rectangle the pointer actually moves in, which
 # is what a coordinate handed to `click_at` has to be inside.
 pointer_size() {
+  if [ "${TOPBAR_SMOKE_COMPOSITOR:-niri}" = mango ]; then
+    mmsg get all-monitors 2>/dev/null | python3 -c '
+import json, sys
+outputs = json.load(sys.stdin)["monitors"]
+if outputs:
+    output = min(outputs, key=lambda item: (item["y"], item["x"]))
+    print(output["width"], output["height"])
+'
+    return
+  fi
   niri msg --json outputs 2>/dev/null | python3 -c '
 import json, sys
 outputs = json.load(sys.stdin)
@@ -80,6 +90,15 @@ for output in outputs.values():
 #
 #   shot_scale 800 600   ->  1066 800   at scale 0.75
 shot_scale() {
+  if [ "${TOPBAR_SMOKE_COMPOSITOR:-niri}" = mango ]; then
+    mmsg get all-monitors 2>/dev/null | python3 -c '
+import json, sys
+outputs = json.load(sys.stdin)["monitors"]
+scale = min(outputs, key=lambda item: (item["y"], item["x"]))["scale"] if outputs else 1.0
+print(round(float(sys.argv[1]) / scale), round(float(sys.argv[2]) / scale))
+' "$1" "$2"
+    return
+  fi
   niri msg --json outputs 2>/dev/null | python3 -c '
 import json, sys
 outputs = json.load(sys.stdin)
@@ -164,10 +183,17 @@ hold_key() {
   sleep "$POINTER_SETTLE"
 }
 
-# Whether niri has the named layer surface mapped. Also in smoke-shot.sh; a
-# driver that only wants to click does not have to source both.
+# Whether the selected compositor has the named layer surface mapped.
+# Also in smoke-shot.sh; pointer-only drivers need not source both.
 pointer_mapped() {
-  niri msg layers 2>/dev/null | grep -q "\"$1\""
+  if [ "${TOPBAR_SMOKE_COMPOSITOR:-niri}" = mango ]; then
+    mmsg get all-layers 2>/dev/null | python3 -c '
+import json, sys
+raise SystemExit(0 if any(layer["name"] == sys.argv[1] for layer in json.load(sys.stdin)["layers"]) else 1)
+' "$1"
+  else
+    niri msg layers 2>/dev/null | grep -q "\"$1\""
+  fi
 }
 
 # Wait for the named surface to appear, up to POINTER_WAIT seconds.

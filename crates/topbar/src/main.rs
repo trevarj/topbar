@@ -1,4 +1,4 @@
-//! topbar — GNOME Shell-inspired GTK4 top bar for niri.
+//! topbar: GNOME Shell-inspired GTK4 top bar for Niri and MangoWM.
 //!
 //! The binary is both the panel and its command-line client: with no
 //! subcommand it loads the configuration and runs the bar, and every

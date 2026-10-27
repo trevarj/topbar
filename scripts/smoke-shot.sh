@@ -1,4 +1,4 @@
-# Screenshot helper for the nested-niri smoke drivers. Source it, do not run
+# Screenshot helper for the nested Wayland smoke drivers. Source it, do not run
 # it: `. "$(dirname "$0")/smoke-shot.sh"`.
 #
 # `grim` hands back the last frame the nested niri *presented*, and a winit
@@ -48,9 +48,16 @@ shot_colours() {
   magick "$1" -crop "100%x100%+0+$SHOT_BAR" +repage -format "%k" info: 2>/dev/null || echo 0
 }
 
-# Whether niri has the named layer surface mapped.
+# Whether the selected compositor has the named layer surface mapped.
 shot_mapped() {
-  niri msg layers 2>/dev/null | grep -q "\"$1\""
+  if [ "${TOPBAR_SMOKE_COMPOSITOR:-niri}" = mango ]; then
+    mmsg get all-layers 2>/dev/null | python3 -c '
+import json, sys
+raise SystemExit(0 if any(layer["name"] == sys.argv[1] for layer in json.load(sys.stdin)["layers"]) else 1)
+' "$1"
+  else
+    niri msg layers 2>/dev/null | grep -q "\"$1\""
+  fi
 }
 
 # One frame, after letting the panel settle for a moment. No stillness check:

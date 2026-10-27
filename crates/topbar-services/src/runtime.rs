@@ -240,6 +240,7 @@ impl Services {
     /// [`Self::start_if_needed`], which is why the two live next to each other.
     pub fn start(config: &Config) -> Self {
         let compositor = config.advanced.compositor.clone();
+        let mango = config.advanced.mango.clone();
         let file_search = FileSearchConfig::new(
             config.launcher.file_roots.clone(),
             config.launcher.file_exclusions.clone(),
@@ -279,7 +280,7 @@ impl Services {
             let connectivity = Connectivity::from_network(&network);
             Self {
                 applications: Applications::start(),
-                compositor: Compositor::start(&compositor),
+                compositor: Compositor::start(&compositor, mango),
                 files: FileSearch::start(file_search),
                 launcher_usage: LauncherUsage::new(state.launcher, store.clone()),
                 notifications: Notifications::start(state.notifications, store.clone(), None),

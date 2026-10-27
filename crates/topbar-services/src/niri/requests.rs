@@ -24,6 +24,7 @@ use tokio::time::timeout;
 use tokio_util::codec::{Framed, LinesCodec};
 use tracing::debug;
 
+use crate::compositor::{same_app, same_launcher_application};
 use crate::error::SvcError;
 
 /// How long any single action may take, connection included.
@@ -61,6 +62,15 @@ impl NiriHandle {
             return Err(SvcError::Rejected("window is no longer open".into()));
         }
         self.act(Action::FocusWindow { id }).await
+    }
+    /// Query the focused connector for standalone compositor-neutral dialogs.
+    pub(crate) async fn focused_output_connector(&self) -> Result<Option<String>, SvcError> {
+        match self.request(Request::FocusedOutput).await? {
+            Response::FocusedOutput(output) => Ok(output.map(|output| output.name)),
+            other => Err(SvcError::Protocol(format!(
+                "expected FocusedOutput, got {other:?}"
+            ))),
+        }
     }
     /// Create a handle for `socket`, or a handle that always fails if there is
     /// none.
@@ -263,31 +273,6 @@ fn pick_launcher_window(windows: &[Window], identities: &[&str]) -> Option<u64> 
         // The native ID makes otherwise equal timestamps deterministic.
         .max_by_key(|window| (window.focus_timestamp.map(Duration::from), window.id))
         .map(|window| window.id)
-}
-
-/// Whether a window's app id and a notification's idea of its sender are the
-/// same application.
-///
-/// Case-insensitive, and a leading `@` — which some senders put on the display
-/// name — is not part of the name.
-fn same_app(app_id: &str, identity: &str) -> bool {
-    fn normalise(value: &str) -> String {
-        value.trim().trim_start_matches('@').to_lowercase()
-    }
-
-    normalise(app_id) == normalise(identity)
-}
-
-/// Normalise only forms a desktop entry can explicitly name. This accepts
-/// niri's bare desktop ID beside its `.desktop` form while retaining exact
-/// equality for `StartupWMClass` aliases.
-fn same_launcher_application(app_id: &str, identity: &str) -> bool {
-    fn normalise(value: &str) -> String {
-        let value = value.trim().trim_start_matches('@').to_ascii_lowercase();
-        value.strip_suffix(".desktop").unwrap_or(&value).to_owned()
-    }
-
-    normalise(app_id) == normalise(identity)
 }
 
 /// Write one request and read exactly one reply line.
